@@ -30,6 +30,7 @@ public enum LaunchOutcome: Sendable {
 /// - `Launcher+NewWindow.swift` — per-strategy new-window dispatch + multi-display placement.
 /// - `Launcher+Primitives.swift` — process & Accessibility primitives (open, activate, raise…).
 /// - `Launcher+Finder.swift` — Finder's first-click new-window quirks.
+@unchecked Sendable
 public struct Launcher {
     let provider: SpaceProviding
     let config: StrategyConfig
@@ -97,7 +98,15 @@ public struct Launcher {
             return WindowAX.isMinimized(axWindow)
         }()
         let action = LaunchEngine.dockClick(decision: decision, isFrontmost: isFrontmost, isMinimized: isMinimized)
-        return perform(action, target: target, newWindowSnapshot: snapshot, preferredDisplay: preferredDisplay)
+        
+        var outcome: LaunchOutcome!
+        
+        DispatchQueue.main.sync {
+            outcome = self.perform(action, target: target, newWindowSnapshot: snapshot, preferredDisplay: preferredDisplay)
+        }
+        
+//        return perform(action, target: target, newWindowSnapshot: snapshot, preferredDisplay: preferredDisplay)
+        return outcome
     }
 
     /// Dock-icon click on *one specific window* — the "Windows" feature shows an

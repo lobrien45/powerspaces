@@ -50,6 +50,8 @@ enum DisplayInfo {
             guard let cfUUID = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { continue }
             if (CFUUIDCreateString(nil, cfUUID) as String?) == uuid { return id }
         }
+        if uuid == "Main"    { return CGMainDisplayID() }
+        
         return nil
     }
 }

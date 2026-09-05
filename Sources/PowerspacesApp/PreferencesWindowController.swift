@@ -44,6 +44,14 @@ class ActivatingWindowController: NSWindowController, NSWindowDelegate {
         didClose()
         AppActivation.leave()
     }
+    
+    var isKeyAndFrontmost: Bool {
+        NSApp.isActive && window?.isKeyWindow == true
+    }
+
+    func minimize() {
+        window?.miniaturize(nil)
+    }
 }
 
 /// Hosts the SwiftUI `PreferencesView` in a standard titled window. A single

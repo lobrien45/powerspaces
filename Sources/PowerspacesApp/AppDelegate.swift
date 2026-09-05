@@ -7,6 +7,9 @@ import ApplicationServices
 import ColorSync
 import SpaceKit
 
+import Foundation
+import Combine
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     // Typed as the seam: the dock path uses only `snapshot()` + `displays()`.
@@ -96,7 +99,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func makeLauncher() -> Launcher {
         Launcher(provider: provider, config: config,
-                 warn: { message in DispatchQueue.main.async { MainActor.assumeIsolated { HUD.show(message) } } })
+                 warn: { message in DispatchQueue.main.async { MainActor.assumeIsolated { HUD.show(message) } } },
+                 showPreferences: { [weak self] in
+                     MainActor.assumeIsolated { self?.openPreferences() }
+        })
     }
 
     /// Run a (possibly blocking) launcher action off the main thread, then refresh

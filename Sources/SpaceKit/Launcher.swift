@@ -30,17 +30,44 @@ public enum LaunchOutcome: Sendable {
 /// - `Launcher+NewWindow.swift` — per-strategy new-window dispatch + multi-display placement.
 /// - `Launcher+Primitives.swift` — process & Accessibility primitives (open, activate, raise…).
 /// - `Launcher+Finder.swift` — Finder's first-click new-window quirks.
-public struct Launcher: @unchecked Sendable {
+public struct Launcher {
     let provider: SpaceProviding
     let config: StrategyConfig
     let warn: (String) -> Void
-
+    let showPreferences: () -> Void
+    
     public init(provider: SpaceProviding,
                 config: StrategyConfig,
-                warn: @escaping (String) -> Void) {
+                warn: @escaping (String) -> Void,
+                showPreferences: @escaping () -> Void = {}) {
         self.provider = provider
         self.config = config
         self.warn = warn
+        self.showPreferences = showPreferences
+        
+    }
+    
+    /// Boxes the result written inside `DispatchQueue.main.sync` and read right
+    /// after it returns. Safe because `sync` runs its closure to completion
+    /// before returning — there's no actual concurrent access, just a boundary
+    /// the compiler can't see through — same reasoning as `MainThreadTransfer`.
+    private struct MainThreadTransfer<Value>: @unchecked Sendable {
+        let value: Value
+    }
+    private final class ResultBox<T>: @unchecked Sendable {
+        var result: Result<T, Error>?
+    }
+
+    private func runOnMain<T>(_ body: @escaping () throws -> T) throws -> T {
+        if Thread.isMainThread {
+            return try body()
+        }
+        let boxed = MainThreadTransfer(value: body)
+        let resultBox = ResultBox<T>()
+        DispatchQueue.main.sync {
+            resultBox.result = Result { try boxed.value() }
+        }
+        return try resultBox.result!.get()
     }
 
     @discardableResult
@@ -69,6 +96,14 @@ public struct Launcher: @unchecked Sendable {
     @discardableResult
     public func dockClick(target: AppTarget, forceNew: Bool,
                           preferredDisplay: CGRect? = nil, dockSpace: SpaceID? = nil) throws -> LaunchOutcome {
+        // Self-click special case
+        if target.bundleID == Bundle.main.bundleIdentifier {
+            return try runOnMain {
+                self.showPreferences()
+                return .focused
+            }
+        }
+        
         let snapshot = try provider.snapshot()
         // Classify once with the live frontmost app folded in, so the logged state
         // carries the window mode (active / inactive / minimized / hidden) the
@@ -86,6 +121,7 @@ public struct Launcher: @unchecked Sendable {
             guard case let .focusWindow(_, pid) = decision else { return false }
             return frontmostPID == pid
         }()
+        
         // A minimized window must always restore on click, never re-minimize.
         // Read the live AX state for the targeted window (apps like Finder stay
         // frontmost while their last window is minimized, so isFrontmost alone
@@ -98,13 +134,13 @@ public struct Launcher: @unchecked Sendable {
         }()
         let action = LaunchEngine.dockClick(decision: decision, isFrontmost: isFrontmost, isMinimized: isMinimized)
        
-        var outcome: LaunchOutcome!
+//        var outcome: LaunchOutcome!
         
-        DispatchQueue.main.sync {
-            outcome = self.perform(action, target: target, newWindowSnapshot: snapshot, preferredDisplay: preferredDisplay)
-        }
+//        return try runOnMain {
+//            try self.perform(action, target: target, newWindowSnapshot: snapshot, preferredDisplay: preferredDisplay)
+//        }
         
-        return outcome
+        return perform(action, target: target, newWindowSnapshot: snapshot, preferredDisplay: preferredDisplay)
     }
 
     /// Dock-icon click on *one specific window* — the "Windows" feature shows an

@@ -23,6 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// own screen, so two screens behave like two desktops.
     private var docks: [String: DockPanel] = [:]
     private let launcherPanel = AppLauncherPanel()
+    /// The stack popover for pinned folders (one shared panel; opening another
+    /// folder's tile swaps its contents).
+    private let folderPanel = FolderStackPanel()
     /// The optional global shortcut that opens the App Launcher from anywhere. Lazy
     /// so its fire-closure can capture `self`; applied from `applyLauncherHotkey`.
     private lazy var launcherHotkey = GlobalHotkey { [weak self] in self?.launcherPanel.toggle() }
@@ -368,6 +371,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dock.onOpenLauncher = { [weak self] in
             self?.launcherPanel.toggle(on: self?.screen(forDisplay: displayUUID))
         }
+        // Pinned folder: the tile toggles its stack; "Open in Finder" (menu or
+        // middle-click) opens the folder itself in a Finder window.
+        dock.onOpenFolder = { [weak self] folder, tile in
+            self?.folderPanel.toggle(folder: folder, from: tile)
+        }
+        dock.onRevealFolder = { folder in NSWorkspace.shared.open(folder) }
         // Right-click the dock → "Open Preferences": the fallback path in when the
         // menu-bar item is set to Hidden (then there's no icon left to click).
         dock.onOpenPreferences = { [weak self] in self?.openPreferences() }

@@ -1374,6 +1374,61 @@ h.test("single display: a window on it never moves") {
     h.ok(DisplayPlacement.reposition(window: onLeft, displays: [left], active: left) == nil)
 }
 
+// MARK: - DockScope: primary dock covering several displays
+
+print("DockScope — multi-display")
+h.test("a two-region scope lists apps from both screens; a one-region scope only its own") {
+    let snap = SpaceSnapshot(activeSpaceID: 1, windows: [
+        dwin(10, 100, name: "Firefox", bundle: "org.mozilla.firefox",
+             rect: CGRect(x: 100, y: 100, width: 800, height: 600), spaces: [1]),
+        dwin(20, 200, name: "Notes", bundle: "com.apple.Notes",
+             rect: CGRect(x: 2000, y: 100, width: 800, height: 600), spaces: [1]),
+    ])
+    let both = DockScope(regions: [.init(bounds: leftDisplay, visibleSpace: 1),
+                                   .init(bounds: rightDisplay, visibleSpace: 1)],
+                         allDisplays: [leftDisplay, rightDisplay])
+    let rightOnly = DockScope(regions: [.init(bounds: rightDisplay, visibleSpace: 1)],
+                              allDisplays: [leftDisplay, rightDisplay])
+    h.eq(DockModel.apps(in: both, snapshot: snap).map(\.name), ["Firefox", "Notes"],
+         "primary dock sees both screens")
+    h.eq(DockModel.apps(in: rightOnly, snapshot: snap).map(\.name), ["Notes"],
+         "secondary dock sees only its own screen")
+}
+h.test("classify with a scope: a window on an uncovered screen is elsewhere") {
+    let snap = SpaceSnapshot(activeSpaceID: 1, windows: [
+        dwin(10, 100, name: "Firefox", bundle: "org.mozilla.firefox",
+             rect: CGRect(x: 100, y: 100, width: 800, height: 600), spaces: [1]),
+    ], runningBundleIDs: ["org.mozilla.firefox"])
+    let target = AppTarget(bundleID: "org.mozilla.firefox", name: "Firefox")
+    let rightOnly = DockScope(regions: [.init(bounds: rightDisplay, visibleSpace: 1)],
+                              allDisplays: [leftDisplay, rightDisplay])
+    let both = DockScope(regions: [.init(bounds: rightDisplay, visibleSpace: 1),
+                                   .init(bounds: leftDisplay, visibleSpace: 1)],
+                         allDisplays: [leftDisplay, rightDisplay])
+    h.eq(AppState.classify(target: target, snapshot: snap, scope: rightOnly), .windowElsewhere,
+         "right dock doesn't focus a left-screen window")
+    if case .windowHere(let id, _, _) = AppState.classify(target: target, snapshot: snap, scope: both) {
+        h.eq(id, 10, "a dock covering both screens focuses it")
+    } else { h.ok(false, "expected windowHere") }
+}
+
+// MARK: - Folder pins
+
+print("DockModel — folder pins")
+h.test("a pinned folder key round-trips and shows as a non-running folder entry") {
+    let key = DockApp.folderPinKey(for: URL(fileURLWithPath: "/Users/me/Downloads"))
+    h.eq(key, "folder:/Users/me/Downloads", "pin key format")
+    h.eq(DockApp.folderURL(fromPinKey: key)?.path, "/Users/me/Downloads", "round-trips")
+    h.ok(DockApp.folderURL(fromPinKey: "com.apple.Safari") == nil, "an app id isn't a folder")
+    let apps = DockModel.apps(onCurrentSpace: SpaceSnapshot(activeSpaceID: 1, windows: []),
+                              pinnedHere: [key], pinnedEverywhere: [],
+                              nameForBundleID: { _ in nil })
+    h.eq(apps.count, 1, "the folder shows even though nameForBundleID knows nothing")
+    h.ok(apps.first?.isFolder == true, "flagged as a folder")
+    h.ok(apps.first?.isRunning == false, "never running")
+    h.eq(apps.first?.orderKey, key, "its order key is the pin key")
+}
+
 // MARK: - Live provider smoke (skips if CGS is unavailable)
 
 print("Live provider (integration)")

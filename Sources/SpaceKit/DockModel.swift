@@ -82,6 +82,24 @@ public struct DockApp: Equatable, Sendable {
         DockApp(bundleID: nil, name: "Applications", pid: nil, windowCount: 0, isLauncher: true)
     }
 
+    /// Folder pins ("stacks") share the pin lists with apps: a folder is stored as
+    /// the pin key `folder:<absolute path>` wherever a bundle id would go, so
+    /// per-desktop / all-desktops pins, exceptions and the saved order all work for
+    /// folders unchanged. A folder entry carries that key as its `bundleID` (its
+    /// `orderKey` and pin identity) and is never running.
+    public static let folderPinPrefix = "folder:"
+    public static func folderPinKey(for url: URL) -> String {
+        folderPinPrefix + url.standardizedFileURL.path
+    }
+    public static func folderURL(fromPinKey key: String) -> URL? {
+        guard key.hasPrefix(folderPinPrefix) else { return nil }
+        let path = String(key.dropFirst(folderPinPrefix.count))
+        return path.isEmpty ? nil : URL(fileURLWithPath: path, isDirectory: true)
+    }
+    /// The pinned folder this entry stands for, or nil for an app / the launcher.
+    public var folderURL: URL? { bundleID.flatMap(DockApp.folderURL(fromPinKey:)) }
+    public var isFolder: Bool { folderURL != nil }
+
     /// A copy of this entry carrying a live window label (its title-bar text).
     public func withTitle(_ title: String?) -> DockApp {
         DockApp(bundleID: bundleID, name: name, pid: pid, windowCount: windowCount,
@@ -271,6 +289,15 @@ public enum DockModel {
             let here = hereSet.contains(bundleID)
             let everywhere = everywhereSet.contains(bundleID)
             let excluded = everywhere && excludedSet.contains(bundleID)
+            // A pinned folder: never running, named by its (localized) display name.
+            // Kept even if the folder has gone missing, so it can still be unpinned.
+            if let url = DockApp.folderURL(fromPinKey: bundleID) {
+                return DockApp(bundleID: bundleID,
+                               name: FileManager.default.displayName(atPath: url.path),
+                               pid: nil, windowCount: 0,
+                               isPinnedHere: here, isPinnedEverywhere: everywhere,
+                               isExcludedHere: excluded)
+            }
             if let runningApp = runningByBundle[bundleID] {
                 return DockApp(bundleID: runningApp.bundleID, name: runningApp.name, pid: runningApp.pid,
                                windowCount: runningApp.windowCount,

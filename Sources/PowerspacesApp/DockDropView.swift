@@ -3,9 +3,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import AppKit
+import SpaceKit
 
 /// The container view, which doubles as a drag-and-drop target: dropping an
-/// .app pins it to the current desktop (issue 6). As an app is dragged across
+/// .app pins it to the current desktop (issue 6); dropping a plain folder pins it
+/// as a stack (its pin key is `DockApp.folderPinKey`). As an app is dragged across
 /// the bar it reports the cursor position so the panel can open a slot for it.
 final class DockDropView: NSView {
     /// The cursor moved over the bar during an .app drag (window coords). Drives
@@ -13,7 +15,8 @@ final class DockDropView: NSView {
     var onDragMoved: ((NSPoint) -> Void)?
     /// The drag left the bar (or finished) without a drop: close the open slot.
     var onDragLeft: (() -> Void)?
-    /// An .app was dropped: pin it into the slot that's currently open.
+    /// An .app or folder was dropped: pin it into the slot that's currently open.
+    /// The string is the pin key — a bundle id, or `folder:<path>` for a folder.
     var onDropApp: ((String) -> Void)?
     /// Supplies the dock's own right-click menu (Open Preferences / Quit), shown
     /// on a right-click over empty bar background — distinct from an icon's menu,
@@ -39,18 +42,22 @@ final class DockDropView: NSView {
         menu.popUp(positioning: nil, at: convert(event.locationInWindow, from: nil), in: self)
     }
 
-    /// The application bundle URLs carried by a drag (empty for anything else).
-    private func appURLs(_ sender: NSDraggingInfo) -> [URL] {
-        let options: [NSPasteboard.ReadingOptionKey: Any] = [
-            .urlReadingFileURLsOnly: true,
-            .urlReadingContentsConformToTypes: ["com.apple.application-bundle"],
-        ]
-        return sender.draggingPasteboard.readObjects(
-            forClasses: [NSURL.self], options: options) as? [URL] ?? []
+    /// The pin keys carried by a drag: an app bundle's bundle id, or a plain
+    /// folder's `folder:<path>` key. Other files (and packages that aren't apps,
+    /// e.g. a .photoslibrary) are ignored. Empty for anything else.
+    private func pinKeys(_ sender: NSDraggingInfo) -> [String] {
+        let urls = sender.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        return urls.compactMap { url in
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey, .isApplicationKey])
+            if values?.isApplication == true { return Bundle(url: url)?.bundleIdentifier }
+            if values?.isDirectory == true, values?.isPackage != true { return DockApp.folderPinKey(for: url) }
+            return nil
+        }
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        accepting = !appURLs(sender).isEmpty
+        accepting = !pinKeys(sender).isEmpty
         guard accepting else { return [] }
         onDragMoved?(sender.draggingLocation)
         return .copy
@@ -75,17 +82,10 @@ final class DockDropView: NSView {
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        let urls = appURLs(sender)
-        guard !urls.isEmpty else { return false }
-        var handled = false
-        for url in urls {
-            if let bundleID = Bundle(url: url)?.bundleIdentifier {
-                onDropApp?(bundleID)
-                handled = true
-            }
-        }
+        let keys = pinKeys(sender)
+        keys.forEach { onDropApp?($0) }
         // The drop itself tears down the open slot; suppress draggingEnded's close.
         accepting = false
-        return handled
+        return !keys.isEmpty
     }
 }

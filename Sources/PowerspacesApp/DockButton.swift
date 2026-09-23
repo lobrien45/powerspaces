@@ -85,7 +85,7 @@ final class DockButton: NSButton {
         // Acknowledge a launch / new-window click with a quick Dock-style bounce, so a
         // slow cold launch gives instant feedback. A click that just focuses a window
         // already on this desktop needs none (the window comes forward on its own).
-        if !app.isLauncher, forceNew || app.windowCount == 0 { playLaunchFeedback() }
+        if !app.isLauncher, !app.isFolder, forceNew || app.windowCount == 0 { playLaunchFeedback() }
         onActivate?(app, forceNew)
     }
 

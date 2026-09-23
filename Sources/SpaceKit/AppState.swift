@@ -99,10 +99,21 @@ extension AppState {
     /// so the click toggled (minimized) it instead of opening a window on that screen.
     public static func classify(
         target: AppTarget, snapshot: SpaceSnapshot, frontmostPID: pid_t? = nil,
-        currentSpace: SpaceID? = nil
+        currentSpace: SpaceID? = nil, scope: DockScope? = nil
     ) -> AppState {
         // A window on the current Space wins outright — that's the "here" state.
-        if let here = snapshot.windows(of: target, onSpace: currentSpace ?? snapshot.activeSpaceID).first {
+        // With a `scope` (a dock click), "here" means inside that dock's screens:
+        // a window on a screen the dock doesn't cover counts as elsewhere (so it
+        // isn't focused from this dock), while the primary dock — which covers
+        // every screen — focuses a window on another monitor instead of opening one.
+        // Windows on the dock's own screen (its first region) are preferred, so an
+        // app open on both monitors focuses the one under the clicked dock.
+        let hereCandidates: [WindowInfo] = scope.map { scope in
+            let inScope = snapshot.windows(of: target).filter { scope.contains($0, activeSpace: snapshot.activeSpaceID) }
+            guard let own = scope.regions.first?.bounds else { return inScope }
+            return inScope.filter { $0.isOnDisplay(own) } + inScope.filter { !$0.isOnDisplay(own) }
+        } ?? snapshot.windows(of: target, onSpace: currentSpace ?? snapshot.activeSpaceID)
+        if let here = hereCandidates.first {
             return .windowHere(windowID: here.windowID, pid: here.pid,
                                mode: mode(of: here, frontmostPID: frontmostPID))
         }

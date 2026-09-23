@@ -95,7 +95,8 @@ public struct Launcher {
     /// a multi-display setup — see `placeNewWindowHere`.
     @discardableResult
     public func dockClick(target: AppTarget, forceNew: Bool,
-                          preferredDisplay: CGRect? = nil, dockSpace: SpaceID? = nil) throws -> LaunchOutcome {
+                          preferredDisplay: CGRect? = nil, dockSpace: SpaceID? = nil,
+                          scope: DockScope? = nil) throws -> LaunchOutcome {
         // Self-click special case
         if target.bundleID == Bundle.main.bundleIdentifier {
             return try runOnMain {
@@ -114,7 +115,7 @@ public struct Launcher {
         // opening a window there).
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let state = AppState.classify(target: target, snapshot: snapshot, frontmostPID: frontmostPID,
-                                      currentSpace: dockSpace)
+                                      currentSpace: dockSpace, scope: scope)
         Log.debug("dock-click \(target.bundleID ?? target.name ?? "?") — state \(state.label) forceNew=\(forceNew)")
         let decision = LaunchEngine.decide(state: state, config: config, target: target, forceNew: forceNew)
         let isFrontmost: Bool = {
@@ -195,12 +196,14 @@ public struct Launcher {
     /// screen's visible desktop instead of the active Space — so "Quit (this
     /// desktop)" on a dock acts on the desktop that dock is showing.
     @discardableResult
-    public func closeOnCurrentDesktop(target: AppTarget, onDisplay display: CGRect? = nil) throws -> LaunchOutcome {
+    public func closeOnCurrentDesktop(target: AppTarget, onDisplay display: CGRect? = nil,
+                                      scope: DockScope? = nil) throws -> LaunchOutcome {
         guard WindowAX.isTrusted else {
             return warned(target, "needs Accessibility (granted to the powerspaces app) to close its windows here.")
         }
         let snapshot = try provider.snapshot()
         let here = snapshot.windows(of: target).filter { window in
+            if let scope { return scope.contains(window, activeSpace: snapshot.activeSpaceID) }
             if let display { return window.isOnVisibleSpace && window.isOnDisplay(display) }
             return window.isOn(snapshot.activeSpaceID)
         }

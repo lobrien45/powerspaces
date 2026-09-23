@@ -308,7 +308,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                          preferredDisplay: bounds)
                 }
                 return try? launcher.dockClick(target: app.target, forceNew: forceNew,
-                                               preferredDisplay: bounds, dockSpace: dockSpace)
+                                               preferredDisplay: bounds, dockSpace: dockSpace,
+                                               scope: self.dockScope(forDisplay: displayUUID))
             }
         }
         dock.onPinHere = { [weak self] app in
@@ -333,7 +334,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dock.onCloseThisDesktop = { [weak self] app in
             guard let self else { return }
             let bounds = self.bounds(forDisplay: displayUUID)
-            self.runLauncher { _ = try? $0.closeOnCurrentDesktop(target: app.target, onDisplay: bounds) }
+            let scope = self.dockScope(forDisplay: displayUUID)
+            self.runLauncher { _ = try? $0.closeOnCurrentDesktop(target: app.target, onDisplay: bounds,
+                                                                 scope: scope) }
         }
         dock.onCloseAllDesktops = { [weak self] app in
             self?.runLauncher { $0.quitApp(target: app.target) }
@@ -440,6 +443,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if live != .zero { return live }
         }
         return displaySpaces.first { $0.displayUUID == uuid }?.bounds
+    }
+
+    // MARK: - Dock scope (which screens a dock lists)
+
+    /// When on, the primary (menu-bar) screen's dock also lists apps whose windows
+    /// are on the other screens; the other docks still list only their own screen.
+    /// Hard-coded for now — the hook for a future preference (global or per display).
+    private static let primaryDockShowsAllDisplays = true
+
+    /// Whether this display is the primary screen (the one holding the menu bar in
+    /// System Settings → Displays → Arrange).
+    private func isPrimaryDisplay(_ uuid: String) -> Bool {
+        NSScreen.screens.first { $0.displayUUID == uuid }?.displayID == CGMainDisplayID()
+    }
+
+    /// The displays whose windows the dock on `uuid` lists, own display first.
+    private func coveredDisplays(forDockOn uuid: String) -> [DisplaySpaceInfo] {
+        guard let own = displaySpaces.first(where: { $0.displayUUID == uuid }) else { return [] }
+        guard Self.primaryDockShowsAllDisplays, isPrimaryDisplay(uuid) else { return [own] }
+        return [own] + displaySpaces.filter { $0.displayUUID != uuid }
+    }
+
+    /// The `DockScope` for the dock on `uuid`: each covered screen's live bounds
+    /// paired with its visible desktop. `ownBounds` overrides the dock's own screen
+    /// bounds (refresh passes the panel's authoritative value).
+    private func dockScope(forDisplay uuid: String, ownBounds: CGRect? = nil) -> DockScope? {
+        let covered = coveredDisplays(forDockOn: uuid)
+        guard !covered.isEmpty else { return nil }
+        let regions = covered.compactMap { info -> DockScope.Region? in
+            let isOwn = info.displayUUID == uuid
+            guard let bounds = (isOwn ? ownBounds : nil) ?? self.bounds(forDisplay: info.displayUUID),
+                  bounds != .zero else { return nil }
+            return DockScope.Region(bounds: bounds, visibleSpace: info.currentSpaceID)
+        }
+        let allBounds = NSScreen.screens.map { CGDisplayBounds($0.displayID) }.filter { $0 != .zero }
+        return DockScope(regions: regions, allDisplays: allBounds)
     }
 
     /// The `NSScreen` for this display, or nil if it isn't currently attached — used
@@ -832,14 +871,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Hide / auto-hide / show the bar on a screen showing a full-screen app,
             // per the full-screen dock preference (a no-op while the state is unchanged).
             dock.applyFullscreenState(info.isFullscreen)
+            // Which screens this bar lists: its own, plus every other screen when
+            // it's the primary dock (see `coveredDisplays`). Each covered screen is
+            // matched on its own visible desktop, so a window minimized on another
+            // desktop of that screen still doesn't leak in.
+            let scope = dockScope(forDisplay: uuid, ownBounds: displayBounds)
+                ?? DockScope(regions: [.init(bounds: displayBounds, visibleSpace: info.currentSpaceID)],
+                             allDisplays: allDisplayBounds)
             let display = DockRefresher.displayApps(
-                onDisplay: displayBounds,
+                in: scope,
                 snapshot: displaySnapshot,
-                // This display's visible Space, so a window minimized on another
-                // desktop of the same display doesn't leak into this bar (it's
-                // off-screen-but-real, hence otherwise counted purely by geometry).
-                visibleSpace: info.currentSpaceID,
-                allDisplays: allDisplayBounds,
                 pinnedHere: spaceUUID.map { pins.spacePins(onSpace: $0) } ?? [],
                 pinnedEverywhere: pins.everywherePins(),
                 excludedHere: spaceUUID.map { pins.everywhereExceptions(onSpace: $0) } ?? [],

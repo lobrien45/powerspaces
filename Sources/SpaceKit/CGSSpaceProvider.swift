@@ -74,7 +74,7 @@ public final class CGSSpaceProvider: SpaceProviding {
     public func displays() -> [DisplaySpaceInfo] {
         guard let managed = managedDisplaySpaces() else { return [] }
         let activeUUID = CGSCopyActiveMenuBarDisplayIdentifier(cid)?.takeRetainedValue() as String?
-        return managed.compactMap { display in
+        let infos: [DisplaySpaceInfo] = managed.compactMap { display in
             guard let uuid = display["Display Identifier"] as? String,
                   let current = display["Current Space"] as? [String: Any] else { return nil }
             let spaceID = (current["ManagedSpaceID"] as? NSNumber)?.uint64Value
@@ -124,6 +124,39 @@ public final class CGSSpaceProvider: SpaceProviding {
                 isActive: uuid == activeUUID,
                 spaceIndex: spaceIndex,
                 isFullscreen: currentSpaceType == 4)
+        }
+        return Self.splittingSpannedSpace(infos, activeUUID: activeUUID,
+                                          physical: DisplayInfo.allDisplays())
+    }
+
+    /// With "Displays have separate Spaces" **off**, the window server reports a
+    /// single managed display (identifier `"Main"`) whose Spaces span every screen.
+    /// That UUID matches no physical display, so it would yield one dock (or none).
+    /// Split that one entry into one `DisplaySpaceInfo` per physical screen — each
+    /// with its own UUID and bounds, all sharing the spanned Space — so every screen
+    /// gets its own dock, filtered to the windows on that screen by geometry.
+    /// When separate Spaces are on (entries already map to real displays), this is
+    /// a no-op.
+    static func splittingSpannedSpace(
+        _ infos: [DisplaySpaceInfo],
+        activeUUID: String?,
+        physical: [(uuid: String, bounds: CGRect, isMain: Bool)]
+    ) -> [DisplaySpaceInfo] {
+        let physicalUUIDs = Set(physical.map(\.uuid))
+        guard infos.count == 1, let shared = infos.first,
+              !physicalUUIDs.contains(shared.displayUUID), !physical.isEmpty else { return infos }
+        // The menu bar lives on the primary display when Spaces span displays; the
+        // active identifier is usually "Main" then, so fall back to the main screen.
+        let activeIsPhysical = activeUUID.map(physicalUUIDs.contains) ?? false
+        return physical.map { screen in
+            DisplaySpaceInfo(
+                displayUUID: screen.uuid,
+                bounds: screen.bounds,
+                currentSpaceID: shared.currentSpaceID,
+                currentSpaceUUID: shared.currentSpaceUUID,
+                isActive: activeIsPhysical ? screen.uuid == activeUUID : screen.isMain,
+                spaceIndex: shared.spaceIndex,
+                isFullscreen: shared.isFullscreen)
         }
     }
 

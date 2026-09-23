@@ -22,6 +22,21 @@ enum DisplayInfo {
         return ids.prefix(Int(count)).map { CGDisplayBounds($0) }
     }
 
+    /// Every active display's UUID string (the same form the window server
+    /// reports), global bounds, and whether it's the primary (menu-bar) display.
+    static func allDisplays() -> [(uuid: String, bounds: CGRect, isMain: Bool)] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+        let main = CGMainDisplayID()
+        return ids.prefix(Int(count)).compactMap { id in
+            guard let cfUUID = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue(),
+                  let uuid = CFUUIDCreateString(nil, cfUUID) as String? else { return nil }
+            return (uuid, CGDisplayBounds(id), id == main)
+        }
+    }
+
     /// Bounds of the display that currently owns the menu bar — i.e. the screen
     /// the user is on. Returns nil if the window server or the display lookup
     /// can't answer. Uses the same `CGSCopyActiveMenuBarDisplayIdentifier` signal

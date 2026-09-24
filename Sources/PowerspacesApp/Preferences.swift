@@ -170,6 +170,7 @@ final class Preferences: ObservableObject {
         static let menuBarShowsDesktopNumber = "menuBarShowsDesktopNumber"
         static let launchAtLogin = "launchAtLogin"
         static let hideAppleDock = "hideAppleDock"
+        static let reserveDockSpace = "reserveDockSpace"
         static let fasterDesktopSwitch = "fasterDesktopSwitch"
         static let fasterKeyboardSwitch = "fasterKeyboardSwitch"
         // Internal bookkeeping (not user-facing): set while we've disabled the
@@ -261,6 +262,7 @@ final class Preferences: ObservableObject {
             K.menuBarShowsDesktopNumber: false,
             K.launchAtLogin: true,
             K.hideAppleDock: true,
+            K.reserveDockSpace: true,
             K.fasterDesktopSwitch: false,
             K.fasterKeyboardSwitch: false,
             K.appLauncherEnabled: true,
@@ -406,6 +408,9 @@ final class Preferences: ObservableObject {
     /// in for it. Toggling this is acted on by `AppleDockController` (driven from
     /// `AppDelegate`), which forces the Dock to stay auto-hidden / restores it.
     var hideAppleDock: Bool { get { bln(K.hideAppleDock) } set { setBln(newValue, K.hideAppleDock) } }
+    /// Keep maximised / tiled windows from extending behind the dock while it's
+    /// not auto-hiding, like the macOS Dock does. Needs Accessibility.
+    var reserveDockSpace: Bool { get { bln(K.reserveDockSpace) } set { setBln(newValue, K.reserveDockSpace) } }
     /// "Faster desktop switch": intercept the trackpad space-switch swipe and jump
     /// instantly, skipping macOS's slide animation. Off by default — it changes how
     /// the swipe lands and uses private APIs. Acted on by `AppDelegate` (which

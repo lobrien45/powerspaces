@@ -26,6 +26,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The stack popover for pinned folders (one shared panel; opening another
     /// folder's tile swaps its contents).
     private let folderPanel = FolderStackPanel()
+    /// Trims zoomed/tiled windows so they stop at a non-auto-hiding dock.
+    private let spaceReserver = DockSpaceReserver()
     /// The optional global shortcut that opens the App Launcher from anywhere. Lazy
     /// so its fire-closure can capture `self`; applied from `applyLauncherHotkey`.
     private lazy var launcherHotkey = GlobalHotkey { [weak self] in self?.launcherPanel.toggle() }
@@ -272,6 +274,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.runLaunch(target: app.target) { try? $0.dockClick(target: app.target, forceNew: forceNew) }
         }
         applyLauncherHotkey() // register the global launcher shortcut if one is set
+        // Which strip each screen's dock reserves (nil = none): only while the
+        // feature is on and that screen's dock is showing and not auto-hiding.
+        spaceReserver.reservation = { [weak self] screen in
+            guard Preferences.shared.reserveDockSpace, let uuid = screen.displayUUID,
+                  let inset = self?.docks[uuid]?.reservedInset else { return nil }
+            let edge: ReservedArea.Edge
+            switch Preferences.shared.barPosition {
+            case .bottom: edge = .bottom
+            case .top: edge = .top
+            case .left: edge = .left
+            case .right: edge = .right
+            }
+            return (edge, inset)
+        }
+        applySpaceReservation()
         InstalledAppsStore.shared.reload() // pre-warm the app list so the launcher opens instantly
         // The strategy controller writes config.json; reload it into the live
         // launcher and refresh so the docks' submenu ticks update.
@@ -630,7 +647,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         launcherHotkey.apply(keyCode: hotkey.keyCode, modifiers: hotkey.carbonModifiers)
     }
 
+    /// Start/stop the window-trimming watcher to match the preference, then
+    /// re-check every window (the dock may have appeared, resized, moved, or
+    /// stopped auto-hiding). Cheap and idempotent. `start()` also retries apps it
+    /// couldn't attach to earlier, e.g. before Accessibility was granted.
+    private func applySpaceReservation() {
+        if Preferences.shared.reserveDockSpace && !Preferences.shared.autoHideEnabled {
+            spaceReserver.start()
+            // After the docks have laid out for the new settings.
+            DispatchQueue.main.async { [weak self] in self?.spaceReserver.sweep() }
+        } else {
+            spaceReserver.stop()
+        }
+    }
+
     @objc private func preferencesDidChange() {
+        applySpaceReservation()
         // Only touch the system Dock when this specific toggle flipped — every
         // preference change posts this notification, and rewriting defaults +
         // restarting the Dock on each one would be jarring.
@@ -758,6 +790,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func screensChanged() {
         pollIdleTicks = 0
         refresh()
+        // Screen geometry changed: re-trim windows against the new layout (the
+        // sweep runs async, after the docks re-place below).
+        applySpaceReservation()
         // refresh() adds/removes docks but leaves survivors where they are, and a
         // pure geometry change doesn't alter their contents (so no rebuild → no
         // reposition). Re-place every surviving dock on its (possibly moved) screen
@@ -805,6 +840,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// decide whether to back off.
     @discardableResult
     private func refresh() -> Bool {
+        // Accessibility may have been granted since launch: start trimming windows
+        // then (a cheap no-op once running, or while the feature is off).
+        if !spaceReserver.isRunning, Preferences.shared.reserveDockSpace,
+           !Preferences.shared.autoHideEnabled, AXIsProcessTrusted() {
+            applySpaceReservation()
+        }
         guard let snapshot = try? provider.snapshot() else { return false }
         // Pids that own at least one window this tick — the shared basis for both
         // window-less treatments (reaping idle instances, and the window-less dock

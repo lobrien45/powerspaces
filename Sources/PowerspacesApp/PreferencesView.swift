@@ -188,6 +188,8 @@ struct PreferencesView: View {
         .init(name: "Dock color / tint", tab: 0, keywords: "tint colour background"),
         .init(name: "Dock outline", tab: 0, keywords: "border"),
         .init(name: "Auto-hide the dock", tab: 0, keywords: "hide reveal"),
+        .init(name: "Keep maximised windows clear of the dock", tab: 0,
+              keywords: "maximize maximise zoom tile reserve overlap behind visible frame"),
         .init(name: "Dock on full-screen apps", tab: 0, keywords: "fullscreen full screen hide show auto-hide"),
         .init(name: "Current-desktop indicator", tab: 0, keywords: "badge number space"),
         .init(name: "Icon size", tab: 1, keywords: "big small"),
@@ -370,6 +372,11 @@ struct PreferencesView: View {
                 Toggle("Hide the dock automatically", isOn: bind(\.autoHideEnabled))
                     .help("Tuck the bar off its screen edge when the pointer is away, and "
                           + "reveal it when the pointer returns to that edge.")
+                Toggle("Keep maximised windows clear of the dock", isOn: bind(\.reserveDockSpace))
+                    .disabled(prefs.autoHideEnabled)
+                    .help("While the dock isn't auto-hiding, zoomed and tiled windows stop at "
+                          + "the dock instead of extending behind it, like the macOS Dock. "
+                          + "Needs Accessibility.")
                 if advanced {
                     enumPicker("Animation",
                                help: "How the bar hides and reveals: slide off the edge, fade in "

@@ -1179,6 +1179,17 @@ final class DockPanel: NSPanel {
         setFrameOrigin(placedOrigin(forSize: frame.size, on: screen))
     }
 
+    /// How many points, measured in from the screen edge the bar hugs, this dock
+    /// keeps clear of maximised windows — the edge gap, the bar, and a matching gap
+    /// on its inner side, so a zoomed window sits the same distance from the bar as
+    /// the bar sits from the edge. nil when it reserves nothing: hidden, removed for
+    /// a full-screen app, or auto-hiding (like the macOS Dock, an auto-hiding bar
+    /// lets windows use the whole screen).
+    var reservedInset: CGFloat? {
+        guard isVisible, !autoHideActive, !fullyHidden else { return nil }
+        return CGFloat(Preferences.shared.edgeGap) * 2 + barThickness()
+    }
+
     /// Where the panel's origin goes for a given size, per bar position.
     /// Top/bottom bars center horizontally and hug a horizontal edge; left/right
     /// bars center vertically and hug a vertical edge. (visibleFrame already

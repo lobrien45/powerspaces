@@ -1433,6 +1433,37 @@ h.test("coverage: undocked screens fold into the first dock when main has none")
          ["B"], "other docks stay own-screen")
 }
 
+// MARK: - ReservedArea (keep maximised windows clear of the dock)
+
+print("ReservedArea")
+// A 1440×900 screen below a 25pt menu bar: visible area y 25…900 (top-left coords).
+let visibleArea = CGRect(x: 0, y: 25, width: 1440, height: 875)
+h.test("a zoomed window is trimmed to stop at a bottom dock") {
+    let zoomed = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    h.eq(ReservedArea.adjusted(window: zoomed, visible: visibleArea, edge: .bottom, inset: 80),
+         CGRect(x: 0, y: 25, width: 1440, height: 795), "bottom now at 900 − 80")
+}
+h.test("a left-half tile is trimmed too; a window dragged over the bar is left alone") {
+    let leftHalf = CGRect(x: 0, y: 25, width: 720, height: 875)
+    h.eq(ReservedArea.adjusted(window: leftHalf, visible: visibleArea, edge: .bottom, inset: 80)?.maxY,
+         820, "tile stops at the dock")
+    let dragged = CGRect(x: 200, y: 400, width: 600, height: 460) // ends at 860, not snapped
+    h.ok(ReservedArea.adjusted(window: dragged, visible: visibleArea, edge: .bottom, inset: 80) == nil,
+         "unsnapped window untouched")
+}
+h.test("side and top docks push the snapped edge inward; already-clear windows untouched") {
+    let zoomed = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    h.eq(ReservedArea.adjusted(window: zoomed, visible: visibleArea, edge: .left, inset: 70),
+         CGRect(x: 70, y: 25, width: 1370, height: 875), "left dock")
+    h.eq(ReservedArea.adjusted(window: zoomed, visible: visibleArea, edge: .right, inset: 70),
+         CGRect(x: 0, y: 25, width: 1370, height: 875), "right dock")
+    h.eq(ReservedArea.adjusted(window: zoomed, visible: visibleArea, edge: .top, inset: 60),
+         CGRect(x: 0, y: 85, width: 1440, height: 815), "top dock")
+    let clear = CGRect(x: 0, y: 25, width: 1440, height: 795)
+    h.ok(ReservedArea.adjusted(window: clear, visible: visibleArea, edge: .bottom, inset: 80) == nil,
+         "no change once it fits")
+}
+
 // MARK: - Folder pins
 
 print("DockModel — folder pins")

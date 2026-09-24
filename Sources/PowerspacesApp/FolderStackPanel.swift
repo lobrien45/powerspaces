@@ -271,8 +271,16 @@ private struct StackRow: View {
             .padding(.horizontal, 4))
         .onHover { hovering = $0 }
         .onTapGesture(perform: onTap)
-        // Drag a file straight out of the stack into another app or Finder.
-        .onDrag { NSItemProvider(contentsOf: node.url) ?? NSItemProvider() }
+        // Drag the file itself out of the stack, like a Dock stack. The provider
+        // carries the file's URL (not a copy of its contents), so Finder moves or
+        // copies the real file under its real name, and other apps receive the file
+        // as-is. `NSItemProvider(contentsOf:)` handed over only the data, and Finder
+        // then named the new file after its type ("JavaScript.js", "Patch file.PATCH").
+        .onDrag {
+            let provider = NSItemProvider(object: node.url as NSURL)
+            provider.suggestedName = node.url.lastPathComponent
+            return provider
+        }
         .contextMenu {
             Button("Open") { onOpen(node.url) }
             Button("Show in Finder") { onReveal(node.url) }

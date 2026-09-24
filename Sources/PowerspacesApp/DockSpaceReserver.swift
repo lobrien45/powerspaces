@@ -22,7 +22,13 @@ final class DockSpaceReserver {
     /// auto-hiding, full-screen app, feature off).
     var reservation: (NSScreen) -> (edge: ReservedArea.Edge, inset: CGFloat)? = { _ in nil }
 
+    typealias Reservation = (edge: ReservedArea.Edge, inset: CGFloat)
+
     private var observers: [pid_t: AXObserver] = [:]
+    /// What each display's windows were last trimmed against (display UUID →
+    /// reservation). Compared on every `updateReservations()` so that when a dock
+    /// grows, shrinks or moves edge, the windows trimmed to its old line follow it.
+    private var applied: [String: Reservation] = [:]
     private var pending: [AXUIElement: DispatchWorkItem] = [:]
     private var workspaceTokens: [NSObjectProtocol] = []
     private(set) var isRunning = false
@@ -64,15 +70,37 @@ final class DockSpaceReserver {
         Array(observers.keys).forEach(unobserve)
         pending.values.forEach { $0.cancel() }
         pending.removeAll()
+        applied.removeAll()
     }
 
-    /// Re-check every window now — after the dock appears, stops auto-hiding,
-    /// changes size or position, or the screens change.
-    func sweep() {
+    /// Re-read every display's reservation (the dock's height, gap, edge or
+    /// visibility may have changed) and, if any differ from what windows were last
+    /// trimmed to, re-check every window: ones on the old line move to the new one.
+    /// Cheap when nothing changed, so it's called on every dock refresh.
+    func updateReservations() {
+        guard isRunning else { return }
+        var changes: [String: (old: Reservation, new: Reservation?)] = [:]
+        var anyNew = false
+        for screen in NSScreen.screens {
+            guard let uuid = screen.displayUUID else { continue }
+            let now = reservation(screen)
+            let old = applied[uuid]
+            let same = now?.edge == old?.edge && abs((now?.inset ?? -1) - (old?.inset ?? -1)) < 0.5
+            guard !same else { continue }
+            if let old { changes[uuid] = (old, now) } else { anyNew = true }
+            applied[uuid] = now
+        }
+        if anyNew || !changes.isEmpty { sweep(changes: changes) }
+    }
+
+    /// Re-check every window now (e.g. right after starting).
+    func sweep() { sweep(changes: [:]) }
+
+    private func sweep(changes: [String: (old: Reservation, new: Reservation?)]) {
         guard isRunning else { return }
         for pid in observers.keys {
             let app = AXUIElementCreateApplication(pid)
-            for window in Self.windows(of: app) { enforce(window) }
+            for window in Self.windows(of: app) { enforce(window, changes: changes) }
         }
     }
 
@@ -133,16 +161,31 @@ final class DockSpaceReserver {
 
     // MARK: Enforcement
 
-    private func enforce(_ window: AXUIElement) {
+    /// Trim `window` to its screen's reservation. `changes` carries, per display,
+    /// the reservation windows were trimmed to before (so a window on that old
+    /// line follows a dock that grew, shrank or moved to another edge).
+    private func enforce(_ window: AXUIElement,
+                         changes: [String: (old: Reservation, new: Reservation?)] = [:]) {
         // Don't fight a live drag/resize — check again once the button is up.
         if NSEvent.pressedMouseButtons & 1 != 0 { schedule(window); return }
         guard Self.isStandardWindow(window), !Self.isFullScreen(window),
-              let frame = Self.frame(of: window),
-              let screen = Self.screen(containing: frame),
-              let reserved = reservation(screen),
-              let target = ReservedArea.adjusted(window: frame,
-                                                 visible: Self.topLeft(screen.visibleFrame),
-                                                 edge: reserved.edge, inset: reserved.inset)
+              var frame = Self.frame(of: window),
+              let screen = Self.screen(containing: frame) else { return }
+        let visible = Self.topLeft(screen.visibleFrame)
+        let change = screen.displayUUID.flatMap { changes[$0] }
+        // The bar moved to another edge: release windows from the old edge's line
+        // first. (When the reservation merely goes away — auto-hide, a full-screen
+        // app — windows are left as they are, like the macOS Dock.)
+        if let change, let new = change.new, new.edge != change.old.edge,
+           let released = ReservedArea.adjusted(window: frame, visible: visible, edge: change.old.edge,
+                                                inset: 0, previousInset: change.old.inset) {
+            Self.setFrame(released, of: window)
+            frame = released
+        }
+        guard let reserved = reservation(screen) else { return }
+        let previous = change.flatMap { $0.old.edge == reserved.edge ? $0.old.inset : nil }
+        guard let target = ReservedArea.adjusted(window: frame, visible: visible, edge: reserved.edge,
+                                                 inset: reserved.inset, previousInset: previous)
         else { return }
         Self.setFrame(target, of: window)
     }

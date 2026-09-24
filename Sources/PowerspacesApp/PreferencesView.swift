@@ -190,6 +190,8 @@ struct PreferencesView: View {
         .init(name: "Auto-hide the dock", tab: 0, keywords: "hide reveal"),
         .init(name: "Keep maximised windows clear of the dock", tab: 0,
               keywords: "maximize maximise zoom tile reserve overlap behind visible frame"),
+        .init(name: "Apply dock gap to Rectangle", tab: 0,
+              keywords: "rectangle pro hookshot window manager gap screen edge"),
         .init(name: "Dock on full-screen apps", tab: 0, keywords: "fullscreen full screen hide show auto-hide"),
         .init(name: "Current-desktop indicator", tab: 0, keywords: "badge number space"),
         .init(name: "Icon size", tab: 1, keywords: "big small"),
@@ -377,6 +379,13 @@ struct PreferencesView: View {
                     .help("While the dock isn't auto-hiding, zoomed and tiled windows stop at "
                           + "the dock instead of extending behind it, like the macOS Dock. "
                           + "Needs Accessibility.")
+                Button("Apply dock gap to Rectangle / Rectangle Pro") {
+                    NotificationCenter.default.post(name: .applyRectangleGaps, object: nil)
+                }
+                .help("Sets Rectangle's hidden screen-edge gap to the space the dock takes up, "
+                      + "so its window actions stop at the dock straight away. Quits and "
+                      + "reopens Rectangle if it's running. Press again after changing the "
+                      + "dock's size, gap or position.")
                 if advanced {
                     enumPicker("Animation",
                                help: "How the bar hides and reveals: slide off the edge, fade in "

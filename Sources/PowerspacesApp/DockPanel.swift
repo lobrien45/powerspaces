@@ -1187,7 +1187,13 @@ final class DockPanel: NSPanel {
     /// lets windows use the whole screen).
     var reservedInset: CGFloat? {
         guard isVisible, !autoHideActive, !fullyHidden else { return nil }
-        return CGFloat(Preferences.shared.edgeGap) * 2 + barThickness()
+        return reservedThickness
+    }
+
+    /// The strip this dock would reserve when shown (ignoring auto-hide): the
+    /// value handed to Rectangle's screen-edge gap.
+    var reservedThickness: CGFloat {
+        CGFloat(Preferences.shared.edgeGap) * 2 + barThickness()
     }
 
     /// Where the panel's origin goes for a given size, per bar position.

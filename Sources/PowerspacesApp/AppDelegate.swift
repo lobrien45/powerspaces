@@ -301,6 +301,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(preferencesDidChange),
             name: .preferencesDidChange, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(applyRectangleGaps),
+            name: .applyRectangleGaps, object: nil)
         // Build the docks for the displays that should have one. `refresh()` calls
         // `reconcileDocks`, which creates, configures, and shows each panel.
         refresh()
@@ -655,9 +658,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if Preferences.shared.reserveDockSpace && !Preferences.shared.autoHideEnabled {
             spaceReserver.start()
             // After the docks have laid out for the new settings.
-            DispatchQueue.main.async { [weak self] in self?.spaceReserver.sweep() }
+            DispatchQueue.main.async { [weak self] in self?.spaceReserver.updateReservations() }
         } else {
             spaceReserver.stop()
+        }
+    }
+
+    /// Preferences → "Apply dock gap to Rectangle": write the live dock's reserved
+    /// strip into Rectangle / Rectangle Pro. Uses the main screen's dock (else any
+    /// dock), so it matches exactly what the window trimmer reserves.
+    @objc private func applyRectangleGaps() {
+        let prefs = Preferences.shared
+        let dock = NSScreen.mainDisplayUUID.flatMap { docks[$0] } ?? docks.values.first
+        let thickness = dock?.reservedThickness
+            ?? CGFloat(prefs.edgeGap * 2 + prefs.dockHeight)
+        RectangleSync.apply(edge: prefs.barPosition, gap: Int(thickness.rounded(.up)),
+                            mainScreenOnly: prefs.dockScreensMode == .mainScreen) { message in
+            HUD.show(message, force: true)
         }
     }
 
@@ -944,6 +961,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if marked != lastDisplayByDisplay[uuid] { anyChanged = true }
             lastDisplayByDisplay[uuid] = marked
         }
+        // A dock may have changed thickness (height/icon size/labels), edge or
+        // visibility this tick: move windows trimmed to its old line.
+        spaceReserver.updateReservations()
         return anyChanged
     }
 

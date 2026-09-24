@@ -1464,6 +1464,23 @@ h.test("side and top docks push the snapped edge inward; already-clear windows u
          "no change once it fits")
 }
 
+h.test("a trimmed window follows the dock when it grows or shrinks") {
+    // Trimmed for an 80pt dock: bottom at 820. Dock grows to 100 → pushed to 800.
+    let trimmed = CGRect(x: 0, y: 25, width: 1440, height: 795)
+    h.eq(ReservedArea.adjusted(window: trimmed, visible: visibleArea, edge: .bottom,
+                               inset: 100, previousInset: 80)?.maxY, 800, "pushed in")
+    // Dock shrinks to 60 → let back out to 840.
+    h.eq(ReservedArea.adjusted(window: trimmed, visible: visibleArea, edge: .bottom,
+                               inset: 60, previousInset: 80)?.maxY, 840, "let back out")
+    // Reservation removed (inset 0) → back to the full visible height.
+    h.eq(ReservedArea.adjusted(window: trimmed, visible: visibleArea, edge: .bottom,
+                               inset: 0, previousInset: 80)?.maxY, 900, "restored")
+    // A window that wasn't on the old line is left alone.
+    let other = CGRect(x: 100, y: 100, width: 600, height: 500)
+    h.ok(ReservedArea.adjusted(window: other, visible: visibleArea, edge: .bottom,
+                               inset: 100, previousInset: 80) == nil, "unrelated window untouched")
+}
+
 // MARK: - Folder pins
 
 print("DockModel — folder pins")

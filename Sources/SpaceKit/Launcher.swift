@@ -133,12 +133,6 @@ public struct Launcher {
             return WindowAX.isMinimized(axWindow)
         }()
         let action = LaunchEngine.dockClick(decision: decision, isFrontmost: isFrontmost, isMinimized: isMinimized)
-       
-//        var outcome: LaunchOutcome!
-        
-//        return try runOnMain {
-//            try self.perform(action, target: target, newWindowSnapshot: snapshot, preferredDisplay: preferredDisplay)
-//        }
         
         return perform(action, target: target, newWindowSnapshot: snapshot, preferredDisplay: preferredDisplay)
     }

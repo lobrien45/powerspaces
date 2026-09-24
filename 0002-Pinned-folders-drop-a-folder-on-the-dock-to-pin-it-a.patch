@@ -1,0 +1,803 @@
+From 2c2391831b7884e6bb2cf72e611a16db7156ab33 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 23 Sep 2026 21:57:50 +0000
+Subject: [PATCH 2/2] Pinned folders: drop a folder on the dock to pin it as an
+ accordion stack
+
+---
+ Sources/PowerspacesApp/AppDelegate.swift      |   9 +
+ Sources/PowerspacesApp/DockButton.swift       |   2 +-
+ Sources/PowerspacesApp/DockDropView.swift     |  42 +-
+ .../DockPanel+ContextMenu.swift               |  23 +
+ Sources/PowerspacesApp/DockPanel.swift        |  29 +-
+ Sources/PowerspacesApp/FolderStackPanel.swift | 422 ++++++++++++++++++
+ Sources/SpaceKit/DockModel.swift              |  27 ++
+ Sources/SpaceKitTestRunner/main.swift         |  55 +++
+ 8 files changed, 583 insertions(+), 26 deletions(-)
+ create mode 100644 Sources/PowerspacesApp/FolderStackPanel.swift
+
+diff --git a/Sources/PowerspacesApp/AppDelegate.swift b/Sources/PowerspacesApp/AppDelegate.swift
+index 5283a88..22ef387 100644
+--- a/Sources/PowerspacesApp/AppDelegate.swift
++++ b/Sources/PowerspacesApp/AppDelegate.swift
+@@ -23,6 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
+     /// own screen, so two screens behave like two desktops.
+     private var docks: [String: DockPanel] = [:]
+     private let launcherPanel = AppLauncherPanel()
++    /// The stack popover for pinned folders (one shared panel; opening another
++    /// folder's tile swaps its contents).
++    private let folderPanel = FolderStackPanel()
+     /// The optional global shortcut that opens the App Launcher from anywhere. Lazy
+     /// so its fire-closure can capture `self`; applied from `applyLauncherHotkey`.
+     private lazy var launcherHotkey = GlobalHotkey { [weak self] in self?.launcherPanel.toggle() }
+@@ -368,6 +371,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
+         dock.onOpenLauncher = { [weak self] in
+             self?.launcherPanel.toggle(on: self?.screen(forDisplay: displayUUID))
+         }
++        // Pinned folder: the tile toggles its stack; "Open in Finder" (menu or
++        // middle-click) opens the folder itself in a Finder window.
++        dock.onOpenFolder = { [weak self] folder, tile in
++            self?.folderPanel.toggle(folder: folder, from: tile)
++        }
++        dock.onRevealFolder = { folder in NSWorkspace.shared.open(folder) }
+         // Right-click the dock → "Open Preferences": the fallback path in when the
+         // menu-bar item is set to Hidden (then there's no icon left to click).
+         dock.onOpenPreferences = { [weak self] in self?.openPreferences() }
+diff --git a/Sources/PowerspacesApp/DockButton.swift b/Sources/PowerspacesApp/DockButton.swift
+index cfbe8be..951e83a 100644
+--- a/Sources/PowerspacesApp/DockButton.swift
++++ b/Sources/PowerspacesApp/DockButton.swift
+@@ -85,7 +85,7 @@ final class DockButton: NSButton {
+         // Acknowledge a launch / new-window click with a quick Dock-style bounce, so a
+         // slow cold launch gives instant feedback. A click that just focuses a window
+         // already on this desktop needs none (the window comes forward on its own).
+-        if !app.isLauncher, forceNew || app.windowCount == 0 { playLaunchFeedback() }
++        if !app.isLauncher, !app.isFolder, forceNew || app.windowCount == 0 { playLaunchFeedback() }
+         onActivate?(app, forceNew)
+     }
+ 
+diff --git a/Sources/PowerspacesApp/DockDropView.swift b/Sources/PowerspacesApp/DockDropView.swift
+index 5d808a1..10063a0 100644
+--- a/Sources/PowerspacesApp/DockDropView.swift
++++ b/Sources/PowerspacesApp/DockDropView.swift
+@@ -3,9 +3,11 @@
+ // SPDX-License-Identifier: GPL-3.0-only
+ 
+ import AppKit
++import SpaceKit
+ 
+ /// The container view, which doubles as a drag-and-drop target: dropping an
+-/// .app pins it to the current desktop (issue 6). As an app is dragged across
++/// .app pins it to the current desktop (issue 6); dropping a plain folder pins it
++/// as a stack (its pin key is `DockApp.folderPinKey`). As an app is dragged across
+ /// the bar it reports the cursor position so the panel can open a slot for it.
+ final class DockDropView: NSView {
+     /// The cursor moved over the bar during an .app drag (window coords). Drives
+@@ -13,7 +15,8 @@ final class DockDropView: NSView {
+     var onDragMoved: ((NSPoint) -> Void)?
+     /// The drag left the bar (or finished) without a drop: close the open slot.
+     var onDragLeft: (() -> Void)?
+-    /// An .app was dropped: pin it into the slot that's currently open.
++    /// An .app or folder was dropped: pin it into the slot that's currently open.
++    /// The string is the pin key — a bundle id, or `folder:<path>` for a folder.
+     var onDropApp: ((String) -> Void)?
+     /// Supplies the dock's own right-click menu (Open Preferences / Quit), shown
+     /// on a right-click over empty bar background — distinct from an icon's menu,
+@@ -39,18 +42,22 @@ final class DockDropView: NSView {
+         menu.popUp(positioning: nil, at: convert(event.locationInWindow, from: nil), in: self)
+     }
+ 
+-    /// The application bundle URLs carried by a drag (empty for anything else).
+-    private func appURLs(_ sender: NSDraggingInfo) -> [URL] {
+-        let options: [NSPasteboard.ReadingOptionKey: Any] = [
+-            .urlReadingFileURLsOnly: true,
+-            .urlReadingContentsConformToTypes: ["com.apple.application-bundle"],
+-        ]
+-        return sender.draggingPasteboard.readObjects(
+-            forClasses: [NSURL.self], options: options) as? [URL] ?? []
++    /// The pin keys carried by a drag: an app bundle's bundle id, or a plain
++    /// folder's `folder:<path>` key. Other files (and packages that aren't apps,
++    /// e.g. a .photoslibrary) are ignored. Empty for anything else.
++    private func pinKeys(_ sender: NSDraggingInfo) -> [String] {
++        let urls = sender.draggingPasteboard.readObjects(
++            forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
++        return urls.compactMap { url in
++            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey, .isApplicationKey])
++            if values?.isApplication == true { return Bundle(url: url)?.bundleIdentifier }
++            if values?.isDirectory == true, values?.isPackage != true { return DockApp.folderPinKey(for: url) }
++            return nil
++        }
+     }
+ 
+     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+-        accepting = !appURLs(sender).isEmpty
++        accepting = !pinKeys(sender).isEmpty
+         guard accepting else { return [] }
+         onDragMoved?(sender.draggingLocation)
+         return .copy
+@@ -75,17 +82,10 @@ final class DockDropView: NSView {
+     }
+ 
+     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+-        let urls = appURLs(sender)
+-        guard !urls.isEmpty else { return false }
+-        var handled = false
+-        for url in urls {
+-            if let bundleID = Bundle(url: url)?.bundleIdentifier {
+-                onDropApp?(bundleID)
+-                handled = true
+-            }
+-        }
++        let keys = pinKeys(sender)
++        keys.forEach { onDropApp?($0) }
+         // The drop itself tears down the open slot; suppress draggingEnded's close.
+         accepting = false
+-        return handled
++        return !keys.isEmpty
+     }
+ }
+diff --git a/Sources/PowerspacesApp/DockPanel+ContextMenu.swift b/Sources/PowerspacesApp/DockPanel+ContextMenu.swift
+index ac56860..17eb0da 100644
+--- a/Sources/PowerspacesApp/DockPanel+ContextMenu.swift
++++ b/Sources/PowerspacesApp/DockPanel+ContextMenu.swift
+@@ -38,6 +38,23 @@ extension DockPanel {
+             popUpMenu(menu, from: button)
+             return
+         }
++        // A folder stack: open it, reveal it, and pin/unpin — no strategy/quit items.
++        if app.isFolder {
++            menu.addItem(item("Open in Finder", #selector(revealFolderMenu(_:)), app, symbol: "folder"))
++            menu.addItem(.separator())
++            if app.isPinnedEverywhere {
++                menu.addItem(item(app.isExcludedHere ? "Pin (this desktop)" : "Unpin (this desktop)",
++                                  #selector(toggleHereForEverywhere(_:)), app, symbol: "pin"))
++            } else {
++                menu.addItem(item(app.isPinnedHere ? "Unpin (this desktop)" : "Pin (this desktop)",
++                                  #selector(togglePinHere(_:)), app, symbol: "pin"))
++            }
++            menu.addItem(item(app.isPinnedEverywhere ? "Unpin (all desktops)" : "Pin (all desktops)",
++                              #selector(togglePinEverywhere(_:)), app, symbol: "pin.fill"))
++            addDockColorItems(to: menu)
++            popUpMenu(menu, from: button)
++            return
++        }
+         menu.addItem(item("Open new window", #selector(openNewWindow(_:)), app, symbol: "macwindow.badge.plus"))
+         if app.bundleID != nil {
+             menu.addItem(.separator())
+@@ -231,6 +248,10 @@ extension DockPanel {
+         onSelect?(app, true)
+     }
+     @objc private func openLauncherMenu(_ s: NSMenuItem) { onOpenLauncher?() }
++    @objc private func revealFolderMenu(_ s: NSMenuItem) {
++        guard let folder = (s.representedObject as? DockApp)?.folderURL else { return }
++        onRevealFolder?(folder)
++    }
+     @objc private func disableLauncherMenu(_ s: NSMenuItem) { onDisableLauncher?() }
+ 
+     private func route(_ sender: NSMenuItem, _ handler: ((DockApp) -> Void)?) {
+@@ -245,6 +266,8 @@ extension DockPanel {
+     /// so middle-click does nothing on it.
+     func handleMiddleClick(_ app: DockApp) {
+         guard !app.isLauncher else { return }
++        // A folder stack has no windows to act on: middle-click opens it in Finder.
++        if let folder = app.folderURL { onRevealFolder?(folder); return }
+         switch Preferences.shared.middleClickAction {
+         case .newWindow:
+             onSelect?(app, true) // force a brand-new window, like the menu's "Open new window"
+diff --git a/Sources/PowerspacesApp/DockPanel.swift b/Sources/PowerspacesApp/DockPanel.swift
+index 3567f6c..12f37aa 100644
+--- a/Sources/PowerspacesApp/DockPanel.swift
++++ b/Sources/PowerspacesApp/DockPanel.swift
+@@ -34,6 +34,10 @@ final class DockPanel: NSPanel {
+     var currentStrategy: ((DockApp) -> StrategyKind)?
+     /// The App Launcher tile was clicked: open (or toggle) the all-apps grid.
+     var onOpenLauncher: (() -> Void)?
++    /// A pinned folder tile was clicked: open its stack popover anchored to `from`.
++    var onOpenFolder: ((_ folder: URL, _ from: NSView) -> Void)?
++    /// "Open in Finder" from a folder tile's right-click menu.
++    var onRevealFolder: ((URL) -> Void)?
+     /// Right-click → "Hide App Launcher": turn the launcher tile off.
+     var onDisableLauncher: (() -> Void)?
+     /// Right-click → "Open Preferences…": open the Preferences window. Offered both
+@@ -570,7 +574,7 @@ final class DockPanel: NSPanel {
+             // labeled items with plain single-window icons. The launcher tile is
+             // never labeled (it stands for no window) and never dimmed (it's not a
+             // running/pinned app — it's always live).
+-            let labeled = !app.isLauncher && prefs.showsWindowLabel(windowCount: app.windowCount)
++            let labeled = !app.isLauncher && !app.isFolder && prefs.showsWindowLabel(windowCount: app.windowCount)
+             let width = labeled ? CGFloat(prefs.windowLabelWidth) : side
+             let button = DockButton()
+             button.isBordered = false
+@@ -588,7 +592,8 @@ final class DockPanel: NSPanel {
+             // apps instead and leaves everyone at full opacity. The launcher tile
+             // is always live (not a running/pinned app), so it's never dimmed and
+             // never gets a running box.
+-            button.alphaValue = (boxed || app.isLauncher || app.isRunning) ? 1.0 : dim
++            // A folder stack is always live too (it's never "running").
++            button.alphaValue = (boxed || app.isLauncher || app.isFolder || app.isRunning) ? 1.0 : dim
+             if boxed {
+                 button.setRunningBox(active: app.isRunning,
+                                      gap: CGFloat(prefs.boxGap),
+@@ -606,8 +611,14 @@ final class DockPanel: NSPanel {
+             if !perWindow, !app.isLauncher, app.windowCount > 1 {
+                 button.setWindowBadge(count: app.windowCount)
+             }
+-            button.onActivate = { [weak self] app, forceNew in
+-                if app.isLauncher { self?.onOpenLauncher?() } else { self?.onSelect?(app, forceNew) }
++            button.onActivate = { [weak self, weak button] app, forceNew in
++                if app.isLauncher {
++                    self?.onOpenLauncher?()
++                } else if let folder = app.folderURL, let button {
++                    self?.onOpenFolder?(folder, button)
++                } else {
++                    self?.onSelect?(app, forceNew)
++                }
+             }
+             button.onRightClick = { [weak self] in self?.showMenu(for: app, from: button) }
+             button.onMiddleClick = { [weak self] in self?.handleMiddleClick(app) }
+@@ -1100,6 +1111,9 @@ final class DockPanel: NSPanel {
+ 
+     private func tooltip(for app: DockApp) -> String {
+         if app.isLauncher { return "App Launcher (all applications)" }
++        if app.isFolder {
++            return app.name + (app.isPinnedEverywhere ? " (pinned everywhere)" : " (pinned)")
++        }
+         // In a per-window mode each item already stands for a single window (and
+         // a labeled item shows its full title below), so the "(2)" count would be
+         // redundant/misleading on each copy.
+@@ -1139,6 +1153,13 @@ final class DockPanel: NSPanel {
+ 
+     private func icon(for app: DockApp) -> NSImage? {
+         if app.isLauncher { return LauncherIcon.image(baseColor: Preferences.shared.launcherIconColor) }
++        // Finder's own icon for the folder (Downloads, Documents etc. get their
++        // special glyphs); a generic folder if it's gone missing.
++        if let folder = app.folderURL {
++            return FileManager.default.fileExists(atPath: folder.path)
++                ? NSWorkspace.shared.icon(forFile: folder.path)
++                : NSWorkspace.shared.icon(for: .folder)
++        }
+         if let pid = app.pid, let icon = NSRunningApplication(processIdentifier: pid)?.icon {
+             return icon
+         }
+diff --git a/Sources/PowerspacesApp/FolderStackPanel.swift b/Sources/PowerspacesApp/FolderStackPanel.swift
+new file mode 100644
+index 0000000..375a759
+--- /dev/null
++++ b/Sources/PowerspacesApp/FolderStackPanel.swift
+@@ -0,0 +1,422 @@
++// Powerspaces
++// Copyright © 2026 Sebastian Panman de Wit
++// SPDX-License-Identifier: GPL-3.0-only
++
++import AppKit
++import Combine
++import SwiftUI
++
++// MARK: - Model
++
++/// One file or folder shown in a stack. Folders load their children lazily, the
++/// first time they're expanded.
++@MainActor
++final class StackNode: ObservableObject, Identifiable {
++    let url: URL
++    let name: String
++    let isFolder: Bool
++    let dateAdded: Date
++    let depth: Int
++    @Published var isExpanded = false
++    @Published private(set) var children: [StackNode]?
++    /// Entries past the per-level cap (so a huge folder stays snappy); the row
++    /// offers "Show N more in Finder" instead.
++    private(set) var hiddenCount = 0
++
++    init(url: URL, name: String, isFolder: Bool, dateAdded: Date, depth: Int) {
++        self.url = url
++        self.name = name
++        self.isFolder = isFolder
++        self.dateAdded = dateAdded
++        self.depth = depth
++    }
++
++    var id: URL { url }
++
++    func loadChildren(sort: StackSort) {
++        let (nodes, hidden) = StackNode.contents(of: url, depth: depth + 1, sort: sort)
++        children = nodes
++        hiddenCount = hidden
++    }
++
++    /// Children once loaded, in the given sort. Folders are browsable in place;
++    /// packages (.app, .rtfd, a Photos library …) are treated as files.
++    static func contents(of folder: URL, depth: Int, sort: StackSort,
++                         cap: Int = 200) -> ([StackNode], Int) {
++        let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .localizedNameKey,
++                                      .addedToDirectoryDateKey, .contentModificationDateKey]
++        let urls = (try? FileManager.default.contentsOfDirectory(
++            at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
++        var nodes = urls.map { url -> StackNode in
++            let v = try? url.resourceValues(forKeys: Set(keys))
++            return StackNode(url: url,
++                             name: v?.localizedName ?? url.lastPathComponent,
++                             isFolder: v?.isDirectory == true && v?.isPackage != true,
++                             dateAdded: v?.addedToDirectoryDate ?? v?.contentModificationDate ?? .distantPast,
++                             depth: depth)
++        }
++        switch sort {
++        case .dateAdded:
++            nodes.sort { $0.dateAdded > $1.dateAdded }
++        case .name:
++            nodes.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
++        case .foldersFirst:
++            nodes.sort {
++                if $0.isFolder != $1.isFolder { return $0.isFolder }
++                return $0.name.localizedStandardCompare($1.name) == .orderedAscending
++            }
++        }
++        let hidden = max(0, nodes.count - cap)
++        return (Array(nodes.prefix(cap)), hidden)
++    }
++}
++
++enum StackSort: String, CaseIterable, Identifiable {
++    case dateAdded, name, foldersFirst
++    var id: String { rawValue }
++    var label: String {
++        switch self {
++        case .dateAdded: return "Date Added"
++        case .name: return "Name"
++        case .foldersFirst: return "Folders First"
++        }
++    }
++}
++
++/// The stack's state: its root folder's entries plus the accordion rule — at
++/// most one expanded subfolder per level, so opening one collapses its siblings.
++@MainActor
++final class FolderStackModel: ObservableObject {
++    let folder: URL
++    @Published private(set) var root: [StackNode] = []
++    @Published private(set) var rootHiddenCount = 0
++    @Published var sort: StackSort {
++        didSet {
++            UserDefaults.standard.set(sort.rawValue, forKey: Self.sortKey(folder))
++            reload()
++        }
++    }
++
++    init(folder: URL) {
++        self.folder = folder
++        // Remembered per folder; Downloads-style "newest first" by default.
++        let saved = UserDefaults.standard.string(forKey: Self.sortKey(folder))
++        sort = saved.flatMap(StackSort.init(rawValue:)) ?? .dateAdded
++        reload()
++    }
++
++    private static func sortKey(_ folder: URL) -> String { "folderStackSort:" + folder.path }
++
++    func reload() {
++        let (nodes, hidden) = StackNode.contents(of: folder, depth: 0, sort: sort)
++        root = nodes
++        rootHiddenCount = hidden
++    }
++
++    /// Flip a subfolder open/closed. Opening it collapses its expanded siblings
++    /// (and everything under them) — the accordion behaviour.
++    func toggle(_ node: StackNode, siblings: [StackNode]) {
++        guard node.isFolder else { return }
++        if node.isExpanded {
++            collapse(node)
++        } else {
++            siblings.filter { $0 !== node && $0.isExpanded }.forEach(collapse)
++            if node.children == nil { node.loadChildren(sort: sort) }
++            node.isExpanded = true
++        }
++        objectWillChange.send()
++    }
++
++    private func collapse(_ node: StackNode) {
++        node.isExpanded = false
++        node.children?.forEach { if $0.isExpanded { collapse($0) } }
++    }
++
++    /// Every row currently on screen, in display order (for sizing the panel).
++    var visibleRowCount: Int {
++        func count(_ nodes: [StackNode]) -> Int {
++            nodes.reduce(0) { total, node in
++                total + 1 + (node.isExpanded ? count(node.children ?? []) + (node.hiddenCount > 0 ? 1 : 0) : 0)
++            }
++        }
++        return count(root) + (rootHiddenCount > 0 ? 1 : 0)
++    }
++}
++
++// MARK: - View
++
++private let rowHeight: CGFloat = 28
++private let headerHeight: CGFloat = 44
++
++struct FolderStackView: View {
++    @ObservedObject var model: FolderStackModel
++    var onOpen: (URL) -> Void
++    var onReveal: (URL) -> Void
++
++    var body: some View {
++        VStack(spacing: 0) {
++            header
++            Divider()
++            if model.root.isEmpty {
++                Text("Empty folder")
++                    .foregroundStyle(.secondary)
++                    .frame(maxWidth: .infinity, minHeight: rowHeight * 2)
++            } else {
++                ScrollView {
++                    LazyVStack(spacing: 0) {
++                        rows(model.root, hidden: model.rootHiddenCount, parent: model.folder)
++                    }
++                    .padding(.vertical, 4)
++                }
++            }
++        }
++        .frame(width: 340)
++        .background(VisualEffectBackground())
++    }
++
++    private var header: some View {
++        HStack(spacing: 8) {
++            Image(nsImage: NSWorkspace.shared.icon(forFile: model.folder.path))
++                .resizable().frame(width: 22, height: 22)
++            Text(FileManager.default.displayName(atPath: model.folder.path))
++                .font(.headline).lineLimit(1)
++            Spacer()
++            Menu {
++                Picker("Sort By", selection: $model.sort) {
++                    ForEach(StackSort.allCases) { Text($0.label).tag($0) }
++                }
++                .pickerStyle(.inline)
++            } label: {
++                Image(systemName: "arrow.up.arrow.down")
++            }
++            .menuStyle(.borderlessButton)
++            .fixedSize()
++            .help("Sort")
++            // Opening a folder URL opens it in a Finder window.
++            Button { onOpen(model.folder) } label: { Image(systemName: "folder") }
++                .buttonStyle(.borderless)
++                .help("Open in Finder")
++        }
++        .padding(.horizontal, 12)
++        .frame(height: headerHeight)
++    }
++
++    /// One level of rows; an expanded folder's children render directly beneath
++    /// it (indented), which is what makes the list an accordion. Recursive, hence
++    /// type-erased. `Group` flattens into the surrounding `LazyVStack`.
++    private func rows(_ nodes: [StackNode], hidden: Int, parent: URL) -> AnyView {
++        AnyView(Group {
++            ForEach(nodes) { node in
++                StackRow(node: node,
++                         onTap: {
++                             if node.isFolder {
++                                 withAnimation(.easeInOut(duration: 0.15)) { model.toggle(node, siblings: nodes) }
++                             } else {
++                                 onOpen(node.url)
++                             }
++                         },
++                         onOpen: onOpen, onReveal: onReveal)
++                if node.isExpanded, let children = node.children {
++                    if children.isEmpty {
++                        placeholder("Empty", depth: node.depth + 1)
++                    } else {
++                        rows(children, hidden: node.hiddenCount, parent: node.url)
++                    }
++                }
++            }
++            if hidden > 0 {
++                Button("Show \(hidden) more in Finder…") { onOpen(parent) }
++                    .buttonStyle(.link)
++                    .font(.caption)
++                    .frame(maxWidth: .infinity, minHeight: rowHeight, alignment: .leading)
++                    .padding(.leading, CGFloat(nodes.first?.depth ?? 0) * 16 + 38)
++            }
++        })
++    }
++
++    private func placeholder(_ text: String, depth: Int) -> some View {
++        Text(text)
++            .font(.caption).foregroundStyle(.secondary)
++            .frame(maxWidth: .infinity, minHeight: rowHeight, alignment: .leading)
++            .padding(.leading, CGFloat(depth) * 16 + 38)
++    }
++}
++
++private struct StackRow: View {
++    @ObservedObject var node: StackNode
++    let onTap: () -> Void
++    let onOpen: (URL) -> Void
++    let onReveal: (URL) -> Void
++    @State private var hovering = false
++
++    var body: some View {
++        HStack(spacing: 6) {
++            // Chevron column (kept for files too, so names line up).
++            Image(systemName: "chevron.right")
++                .font(.system(size: 10, weight: .semibold))
++                .rotationEffect(.degrees(node.isExpanded ? 90 : 0))
++                .opacity(node.isFolder ? 0.7 : 0)
++                .frame(width: 12)
++            Image(nsImage: NSWorkspace.shared.icon(forFile: node.url.path))
++                .resizable().frame(width: 20, height: 20)
++            Text(node.name).lineLimit(1).truncationMode(.middle)
++            Spacer(minLength: 0)
++        }
++        .padding(.leading, 10 + CGFloat(node.depth) * 16)
++        .padding(.trailing, 10)
++        .frame(height: rowHeight)
++        .contentShape(Rectangle())
++        .background(RoundedRectangle(cornerRadius: 5)
++            .fill(hovering ? Color.accentColor.opacity(0.25) : .clear)
++            .padding(.horizontal, 4))
++        .onHover { hovering = $0 }
++        .onTapGesture(perform: onTap)
++        // Drag a file straight out of the stack into another app or Finder.
++        .onDrag { NSItemProvider(contentsOf: node.url) ?? NSItemProvider() }
++        .contextMenu {
++            Button("Open") { onOpen(node.url) }
++            Button("Show in Finder") { onReveal(node.url) }
++            Button("Copy") {
++                NSPasteboard.general.clearContents()
++                NSPasteboard.general.writeObjects([node.url as NSURL])
++            }
++            Divider()
++            Button("Move to Trash") {
++                NSWorkspace.shared.recycle([node.url]) { _, _ in }
++            }
++        }
++        .help(node.url.path)
++    }
++}
++
++private struct VisualEffectBackground: NSViewRepresentable {
++    func makeNSView(context: Context) -> NSVisualEffectView {
++        let view = NSVisualEffectView()
++        view.material = .popover
++        view.blendingMode = .behindWindow
++        view.state = .active
++        return view
++    }
++    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
++}
++
++// MARK: - Panel
++
++/// A floating stack for a pinned folder, anchored to its dock tile like the macOS
++/// Dock's List view. Subfolders expand in place (one open per level). Dismisses
++/// on Escape, a click in another app, opening an item, or clicking the tile again.
++@MainActor
++final class FolderStackPanel: NSPanel {
++    private var model: FolderStackModel?
++    private var sizeObserver: Any?
++    private var clickOutsideMonitor: Any?
++    private var keyMonitor: Any?
++    /// The tile it's anchored to, in screen coordinates, and that tile's screen.
++    private var anchor: NSRect = .zero
++    private weak var anchorScreen: NSScreen?
++
++    init() {
++        super.init(contentRect: NSRect(x: 0, y: 0, width: 340, height: 300),
++                   styleMask: [.borderless, .nonactivatingPanel],
++                   backing: .buffered, defer: false)
++        isFloatingPanel = true
++        level = .popUpMenu
++        hidesOnDeactivate = false
++        isReleasedWhenClosed = false
++        isOpaque = false
++        backgroundColor = .clear
++        hasShadow = true
++        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
++    }
++
++    override var canBecomeKey: Bool { true }
++
++    /// Open the stack for `folder` above (or beside) `tile`; clicking the same
++    /// tile again closes it.
++    func toggle(folder: URL, from tile: NSView) {
++        if isVisible, model?.folder == folder { close(); return }
++        guard let window = tile.window else { return }
++        anchor = window.convertToScreen(tile.convert(tile.bounds, to: nil))
++        anchorScreen = window.screen
++
++        let model = FolderStackModel(folder: folder)
++        self.model = model
++        let root = FolderStackView(
++            model: model,
++            onOpen: { [weak self] url in
++                NSWorkspace.shared.open(url)
++                self?.close()
++            },
++            onReveal: { [weak self] url in
++                NSWorkspace.shared.activateFileViewerSelecting([url])
++                self?.close()
++            })
++        let hosting = NSHostingView(rootView: root)
++        hosting.wantsLayer = true
++        hosting.layer?.cornerRadius = 12
++        hosting.layer?.masksToBounds = true
++        contentView = hosting
++
++        // Grow/shrink with the accordion so short lists don't sit in a tall box.
++        sizeObserver = model.objectWillChange.sink { [weak self] _ in
++            DispatchQueue.main.async { self?.layoutAtAnchor() }
++        }
++        layoutAtAnchor()
++        installMonitors()
++        NSApp.activate(ignoringOtherApps: true)
++        makeKeyAndOrderFront(nil)
++    }
++
++    override func close() {
++        removeMonitors()
++        sizeObserver = nil
++        model = nil
++        super.close()
++    }
++
++    /// Size to the visible rows (capped to most of the screen) and sit on the
++    /// bar's inner side of the tile, keeping the dock-facing edge fixed.
++    private func layoutAtAnchor() {
++        guard let model, let screen = anchorScreen ?? NSScreen.main else { return }
++        let visible = screen.visibleFrame
++        let rows = max(model.visibleRowCount, 2)
++        let height = min(headerHeight + 9 + CGFloat(rows) * rowHeight, visible.height * 0.7)
++        let size = NSSize(width: 340, height: height)
++        let gap: CGFloat = 10
++        var origin: NSPoint
++        switch Preferences.shared.barPosition {
++        case .bottom: origin = NSPoint(x: anchor.midX - size.width / 2, y: anchor.maxY + gap)
++        case .top:    origin = NSPoint(x: anchor.midX - size.width / 2, y: anchor.minY - gap - size.height)
++        case .left:   origin = NSPoint(x: anchor.maxX + gap, y: anchor.midY - size.height / 2)
++        case .right:  origin = NSPoint(x: anchor.minX - gap - size.width, y: anchor.midY - size.height / 2)
++        }
++        // Keep it on screen.
++        let frame = screen.frame.insetBy(dx: 6, dy: 6)
++        origin.x = min(max(origin.x, frame.minX), frame.maxX - size.width)
++        origin.y = min(max(origin.y, frame.minY), frame.maxY - size.height)
++        setFrame(NSRect(origin: origin, size: size), display: true)
++        invalidateShadow()
++    }
++
++    private func installMonitors() {
++        removeMonitors()
++        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
++            guard let self, self.isVisible, event.keyCode == 53 else { return event } // Escape
++            self.close()
++            return nil
++        }
++        // Global monitors don't see our own windows, so a click on the tile itself
++        // reaches `toggle` (which closes) instead of reopening straight away.
++        clickOutsideMonitor = NSEvent.addGlobalMonitorForEvents(
++            matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
++            MainActor.assumeIsolated { self?.close() }
++        }
++    }
++
++    private func removeMonitors() {
++        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
++        if let clickOutsideMonitor { NSEvent.removeMonitor(clickOutsideMonitor) }
++        keyMonitor = nil
++        clickOutsideMonitor = nil
++    }
++}
+diff --git a/Sources/SpaceKit/DockModel.swift b/Sources/SpaceKit/DockModel.swift
+index f8ce4aa..52c0612 100644
+--- a/Sources/SpaceKit/DockModel.swift
++++ b/Sources/SpaceKit/DockModel.swift
+@@ -82,6 +82,24 @@ public struct DockApp: Equatable, Sendable {
+         DockApp(bundleID: nil, name: "Applications", pid: nil, windowCount: 0, isLauncher: true)
+     }
+ 
++    /// Folder pins ("stacks") share the pin lists with apps: a folder is stored as
++    /// the pin key `folder:<absolute path>` wherever a bundle id would go, so
++    /// per-desktop / all-desktops pins, exceptions and the saved order all work for
++    /// folders unchanged. A folder entry carries that key as its `bundleID` (its
++    /// `orderKey` and pin identity) and is never running.
++    public static let folderPinPrefix = "folder:"
++    public static func folderPinKey(for url: URL) -> String {
++        folderPinPrefix + url.standardizedFileURL.path
++    }
++    public static func folderURL(fromPinKey key: String) -> URL? {
++        guard key.hasPrefix(folderPinPrefix) else { return nil }
++        let path = String(key.dropFirst(folderPinPrefix.count))
++        return path.isEmpty ? nil : URL(fileURLWithPath: path, isDirectory: true)
++    }
++    /// The pinned folder this entry stands for, or nil for an app / the launcher.
++    public var folderURL: URL? { bundleID.flatMap(DockApp.folderURL(fromPinKey:)) }
++    public var isFolder: Bool { folderURL != nil }
++
+     /// A copy of this entry carrying a live window label (its title-bar text).
+     public func withTitle(_ title: String?) -> DockApp {
+         DockApp(bundleID: bundleID, name: name, pid: pid, windowCount: windowCount,
+@@ -271,6 +289,15 @@ public enum DockModel {
+             let here = hereSet.contains(bundleID)
+             let everywhere = everywhereSet.contains(bundleID)
+             let excluded = everywhere && excludedSet.contains(bundleID)
++            // A pinned folder: never running, named by its (localized) display name.
++            // Kept even if the folder has gone missing, so it can still be unpinned.
++            if let url = DockApp.folderURL(fromPinKey: bundleID) {
++                return DockApp(bundleID: bundleID,
++                               name: FileManager.default.displayName(atPath: url.path),
++                               pid: nil, windowCount: 0,
++                               isPinnedHere: here, isPinnedEverywhere: everywhere,
++                               isExcludedHere: excluded)
++            }
+             if let runningApp = runningByBundle[bundleID] {
+                 return DockApp(bundleID: runningApp.bundleID, name: runningApp.name, pid: runningApp.pid,
+                                windowCount: runningApp.windowCount,
+diff --git a/Sources/SpaceKitTestRunner/main.swift b/Sources/SpaceKitTestRunner/main.swift
+index 12fabaf..26b6e8e 100644
+--- a/Sources/SpaceKitTestRunner/main.swift
++++ b/Sources/SpaceKitTestRunner/main.swift
+@@ -1374,6 +1374,61 @@ h.test("single display: a window on it never moves") {
+     h.ok(DisplayPlacement.reposition(window: onLeft, displays: [left], active: left) == nil)
+ }
+ 
++// MARK: - DockScope: primary dock covering several displays
++
++print("DockScope — multi-display")
++h.test("a two-region scope lists apps from both screens; a one-region scope only its own") {
++    let snap = SpaceSnapshot(activeSpaceID: 1, windows: [
++        dwin(10, 100, name: "Firefox", bundle: "org.mozilla.firefox",
++             rect: CGRect(x: 100, y: 100, width: 800, height: 600), spaces: [1]),
++        dwin(20, 200, name: "Notes", bundle: "com.apple.Notes",
++             rect: CGRect(x: 2000, y: 100, width: 800, height: 600), spaces: [1]),
++    ])
++    let both = DockScope(regions: [.init(bounds: leftDisplay, visibleSpace: 1),
++                                   .init(bounds: rightDisplay, visibleSpace: 1)],
++                         allDisplays: [leftDisplay, rightDisplay])
++    let rightOnly = DockScope(regions: [.init(bounds: rightDisplay, visibleSpace: 1)],
++                              allDisplays: [leftDisplay, rightDisplay])
++    h.eq(DockModel.apps(in: both, snapshot: snap).map(\.name), ["Firefox", "Notes"],
++         "primary dock sees both screens")
++    h.eq(DockModel.apps(in: rightOnly, snapshot: snap).map(\.name), ["Notes"],
++         "secondary dock sees only its own screen")
++}
++h.test("classify with a scope: a window on an uncovered screen is elsewhere") {
++    let snap = SpaceSnapshot(activeSpaceID: 1, windows: [
++        dwin(10, 100, name: "Firefox", bundle: "org.mozilla.firefox",
++             rect: CGRect(x: 100, y: 100, width: 800, height: 600), spaces: [1]),
++    ], runningBundleIDs: ["org.mozilla.firefox"])
++    let target = AppTarget(bundleID: "org.mozilla.firefox", name: "Firefox")
++    let rightOnly = DockScope(regions: [.init(bounds: rightDisplay, visibleSpace: 1)],
++                              allDisplays: [leftDisplay, rightDisplay])
++    let both = DockScope(regions: [.init(bounds: rightDisplay, visibleSpace: 1),
++                                   .init(bounds: leftDisplay, visibleSpace: 1)],
++                         allDisplays: [leftDisplay, rightDisplay])
++    h.eq(AppState.classify(target: target, snapshot: snap, scope: rightOnly), .windowElsewhere,
++         "right dock doesn't focus a left-screen window")
++    if case .windowHere(let id, _, _) = AppState.classify(target: target, snapshot: snap, scope: both) {
++        h.eq(id, 10, "a dock covering both screens focuses it")
++    } else { h.ok(false, "expected windowHere") }
++}
++
++// MARK: - Folder pins
++
++print("DockModel — folder pins")
++h.test("a pinned folder key round-trips and shows as a non-running folder entry") {
++    let key = DockApp.folderPinKey(for: URL(fileURLWithPath: "/Users/me/Downloads"))
++    h.eq(key, "folder:/Users/me/Downloads", "pin key format")
++    h.eq(DockApp.folderURL(fromPinKey: key)?.path, "/Users/me/Downloads", "round-trips")
++    h.ok(DockApp.folderURL(fromPinKey: "com.apple.Safari") == nil, "an app id isn't a folder")
++    let apps = DockModel.apps(onCurrentSpace: SpaceSnapshot(activeSpaceID: 1, windows: []),
++                              pinnedHere: [key], pinnedEverywhere: [],
++                              nameForBundleID: { _ in nil })
++    h.eq(apps.count, 1, "the folder shows even though nameForBundleID knows nothing")
++    h.ok(apps.first?.isFolder == true, "flagged as a folder")
++    h.ok(apps.first?.isRunning == false, "never running")
++    h.eq(apps.first?.orderKey, key, "its order key is the pin key")
++}
++
+ // MARK: - Live provider smoke (skips if CGS is unavailable)
+ 
+ print("Live provider (integration)")
+-- 
+2.43.0
+

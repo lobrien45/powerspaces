@@ -115,6 +115,7 @@ public final class CGSSpaceProvider: SpaceProviding {
                 }
                 return (current["type"] as? NSNumber)?.intValue ?? 0
             }()
+            
             return DisplaySpaceInfo(
                 displayUUID: uuid,
                 bounds: DisplayInfo.bounds(forDisplayUUID: uuid) ?? .zero,

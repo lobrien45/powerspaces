@@ -81,8 +81,7 @@ case "decide", "open":
             print("target: \(target.bundleID ?? target.name ?? appArg)")
             print("decision: \(decision)")
         } else {
-            let launcher = Launcher(provider: provider, config: config,
-                                    warn: { message in print("⚠️  \(message)") })
+            let launcher = Launcher(provider: provider, config: config, warn: { message in print("⚠️  \(message)") })
             let outcome = try launcher.launch(target: target, forceNew: forceNew)
             print("did: \(outcome)")
         }

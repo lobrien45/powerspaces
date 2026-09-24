@@ -286,8 +286,9 @@ struct PreferencesView: View {
             }
             Section {
                 enumPicker("Show dock on",
-                           help: "Put a dock on every screen, or only the screens you pick. Each "
-                               + "screen's dock is independent. It shows and acts on that screen.",
+                           help: "Separate docks: each screen's dock lists only the apps open on "
+                               + "that screen. One dock: the main screen's dock lists the apps "
+                               + "open on every screen.",
                            bind(\.dockScreensMode)) { $0.label }
                 if prefs.dockScreensMode == .selectedScreens {
                     let displays = PreferencesView.connectedDisplays()
@@ -312,9 +313,20 @@ struct PreferencesView: View {
             } header: {
                 Text("Screens")
             } footer: {
-                Text("Each screen gets its own dock showing that screen's windows, so two screens "
-                     + "behave like two desktops. Clicking a screen's dock opens windows on that "
-                     + "screen.")
+                switch prefs.dockScreensMode {
+                case .allScreens:
+                    Text("Each screen gets its own dock showing only that screen's windows, so two "
+                         + "screens behave like two desktops. Clicking a screen's dock opens windows "
+                         + "on that screen.")
+                case .mainScreen:
+                    Text("One dock on the main screen (the one with the menu bar) lists the apps "
+                         + "open on every screen. Clicking an app focuses its window on whichever "
+                         + "screen it's on; new windows open on the main screen.")
+                case .selectedScreens:
+                    Text("Only the screens you pick get a dock. Apps on a screen without a dock "
+                         + "appear in the main screen's dock (or the first dock, if the main screen "
+                         + "has none).")
+                }
             }
             Section {
                 Toggle("Tint the dock", isOn: bind(\.dockTintEnabled))

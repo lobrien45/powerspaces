@@ -370,10 +370,12 @@ final class Preferences: ObservableObject {
         set { objectWillChange.send(); store.set(newValue, K.dockScreenIDs); changed() }
     }
     /// Whether the display with this UUID should show a dock under the current
-    /// settings: always in `.allScreens`, else only if the user selected it.
+    /// settings: always in `.allScreens`, only the main (menu-bar) display in
+    /// `.mainScreen`, else only if the user selected it.
     func showsDockOnDisplay(_ displayUUID: String) -> Bool {
         switch dockScreensMode {
         case .allScreens: return true
+        case .mainScreen: return NSScreen.isMainDisplay(uuid: displayUUID)
         case .selectedScreens: return dockScreenIDs.contains(displayUUID)
         }
     }

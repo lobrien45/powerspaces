@@ -1412,6 +1412,27 @@ h.test("classify with a scope: a window on an uncovered screen is elsewhere") {
     } else { h.ok(false, "expected windowHere") }
 }
 
+h.test("coverage: separate docks each list only their own screen") {
+    let all = ["MAIN", "SIDE"]
+    let docked: Set<String> = ["MAIN", "SIDE"]
+    h.eq(DockScope.coveredDisplayUUIDs(forDockOn: "MAIN", allDisplays: all, docked: docked, mainDisplay: "MAIN"),
+         ["MAIN"], "main dock: own screen only")
+    h.eq(DockScope.coveredDisplayUUIDs(forDockOn: "SIDE", allDisplays: all, docked: docked, mainDisplay: "MAIN"),
+         ["SIDE"], "side dock: own screen only")
+}
+h.test("coverage: one dock on the main screen lists every screen") {
+    h.eq(DockScope.coveredDisplayUUIDs(forDockOn: "MAIN", allDisplays: ["MAIN", "SIDE", "THIRD"],
+                                       docked: ["MAIN"], mainDisplay: "MAIN"),
+         ["MAIN", "SIDE", "THIRD"], "all screens folded into the one dock")
+}
+h.test("coverage: undocked screens fold into the first dock when main has none") {
+    let all = ["MAIN", "A", "B"]
+    h.eq(DockScope.coveredDisplayUUIDs(forDockOn: "A", allDisplays: all, docked: ["A", "B"], mainDisplay: "MAIN"),
+         ["A", "MAIN"], "host dock picks up the undocked main screen")
+    h.eq(DockScope.coveredDisplayUUIDs(forDockOn: "B", allDisplays: all, docked: ["A", "B"], mainDisplay: "MAIN"),
+         ["B"], "other docks stay own-screen")
+}
+
 // MARK: - Folder pins
 
 print("DockModel — folder pins")

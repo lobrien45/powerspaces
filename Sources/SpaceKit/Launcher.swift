@@ -117,11 +117,27 @@ public struct Launcher {
         let state = AppState.classify(target: target, snapshot: snapshot, frontmostPID: frontmostPID,
                                       currentSpace: dockSpace, scope: scope)
         Log.debug("dock-click \(target.bundleID ?? target.name ?? "?") — state \(state.label) forceNew=\(forceNew)")
-        let decision = LaunchEngine.decide(state: state, config: config, target: target, forceNew: forceNew)
-        let isFrontmost: Bool = {
+        var decision = LaunchEngine.decide(state: state, config: config, target: target, forceNew: forceNew)
+        var isFrontmost: Bool = {
             guard case let .focusWindow(_, pid) = decision else { return false }
             return frontmostPID == pid
         }()
+        // A dock covering several screens: "app is frontmost" alone isn't enough to
+        // mean "minimize". The app's focused (main) window may be on a screen this
+        // dock doesn't cover, or be a different window than the one picked. So when
+        // the app is frontmost, act on its main window if it's in this dock's scope
+        // (click → minimize it, like the macOS Dock); otherwise raise the in-scope
+        // window instead of minimizing something the user isn't looking at.
+        if let scope, isFrontmost, case let .focusWindow(_, pid) = decision, WindowAX.isTrusted {
+            let inScope = Set(snapshot.windows(of: target)
+                .filter { scope.contains($0, activeSpace: snapshot.activeSpaceID) }
+                .map(\.windowID))
+            if let main = WindowAX.mainWindowID(pid: pid), inScope.contains(main) {
+                decision = .focusWindow(windowID: main, pid: pid)
+            } else {
+                isFrontmost = false
+            }
+        }
         
         // A minimized window must always restore on click, never re-minimize.
         // Read the live AX state for the targeted window (apps like Finder stay

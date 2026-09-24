@@ -456,22 +456,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Dock scope (which screens a dock lists)
 
-    /// When on, the primary (menu-bar) screen's dock also lists apps whose windows
-    /// are on the other screens; the other docks still list only their own screen.
-    /// Hard-coded for now — the hook for a future preference (global or per display).
-    private static let primaryDockShowsAllDisplays = true
-
-    /// Whether this display is the primary screen (the one holding the menu bar in
-    /// System Settings → Displays → Arrange).
-    private func isPrimaryDisplay(_ uuid: String) -> Bool {
-        NSScreen.screens.first { $0.displayUUID == uuid }?.displayID == CGMainDisplayID()
-    }
-
     /// The displays whose windows the dock on `uuid` lists, own display first.
+    /// Follows `DockScope.coveredDisplayUUIDs`: with a dock on every screen each
+    /// lists only its own; with one dock (main screen only) it lists every screen.
     private func coveredDisplays(forDockOn uuid: String) -> [DisplaySpaceInfo] {
-        guard let own = displaySpaces.first(where: { $0.displayUUID == uuid }) else { return [] }
-        guard Self.primaryDockShowsAllDisplays, isPrimaryDisplay(uuid) else { return [own] }
-        return [own] + displaySpaces.filter { $0.displayUUID != uuid }
+        let keys = DockScope.coveredDisplayUUIDs(
+            forDockOn: uuid,
+            allDisplays: displaySpaces.map(\.displayUUID),
+            docked: Set(docks.keys),
+            mainDisplay: NSScreen.mainDisplayUUID)
+        return keys.compactMap { key in displaySpaces.first { $0.displayUUID == key } }
     }
 
     /// The `DockScope` for the dock on `uuid`: each covered screen's live bounds

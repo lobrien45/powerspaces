@@ -48,6 +48,20 @@ public struct DockScope: Equatable, Sendable {
         return !allDisplays.contains { $0.contains(window.center) }
     }
 
+    /// Which displays' windows the dock on `dock` lists (its own first). Every
+    /// dock lists its own screen. Screens with *no* dock of their own are folded
+    /// into a single host dock — the main display's if it has one, else the first
+    /// dock by UUID — so no app is ever left without an icon:
+    /// - dock on every screen → each lists only its own screen;
+    /// - dock on the main screen only → it lists every screen;
+    /// - selected screens → the undocked screens' apps land in the host dock.
+    public static func coveredDisplayUUIDs(forDockOn dock: String, allDisplays: [String],
+                                           docked: Set<String>, mainDisplay: String?) -> [String] {
+        let host = mainDisplay.flatMap { docked.contains($0) ? $0 : nil } ?? docked.sorted().first
+        guard dock == host else { return [dock] }
+        return [dock] + allDisplays.filter { $0 != dock && !docked.contains($0) }
+    }
+
     private static func resolve(_ space: SpaceID?, _ active: SpaceID) -> SpaceID {
         space.flatMap { $0 != 0 ? $0 : nil } ?? active
     }

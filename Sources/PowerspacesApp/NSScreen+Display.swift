@@ -22,4 +22,13 @@ extension NSScreen {
               let uuid = CFUUIDCreateString(nil, cf) as String? else { return nil }
         return uuid
     }
+
+    /// The main display's UUID — the screen holding the menu bar, as set in
+    /// System Settings → Displays → Arrange (`CGMainDisplayID`, not `NSScreen.main`,
+    /// which follows keyboard focus).
+    static var mainDisplayUUID: String? {
+        screens.first { $0.displayID == CGMainDisplayID() }?.displayUUID
+    }
+
+    static func isMainDisplay(uuid: String) -> Bool { mainDisplayUUID == uuid }
 }

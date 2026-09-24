@@ -34,6 +34,10 @@ final class DockPanel: NSPanel {
     var currentStrategy: ((DockApp) -> StrategyKind)?
     /// The App Launcher tile was clicked: open (or toggle) the all-apps grid.
     var onOpenLauncher: (() -> Void)?
+    /// A pinned folder tile was clicked: open its stack popover anchored to `from`.
+    var onOpenFolder: ((_ folder: URL, _ from: NSView) -> Void)?
+    /// "Open in Finder" from a folder tile's right-click menu.
+    var onRevealFolder: ((URL) -> Void)?
     /// Right-click → "Hide App Launcher": turn the launcher tile off.
     var onDisableLauncher: (() -> Void)?
     /// Right-click → "Open Preferences…": open the Preferences window. Offered both
@@ -570,7 +574,7 @@ final class DockPanel: NSPanel {
             // labeled items with plain single-window icons. The launcher tile is
             // never labeled (it stands for no window) and never dimmed (it's not a
             // running/pinned app — it's always live).
-            let labeled = !app.isLauncher && prefs.showsWindowLabel(windowCount: app.windowCount)
+            let labeled = !app.isLauncher && !app.isFolder && prefs.showsWindowLabel(windowCount: app.windowCount)
             let width = labeled ? CGFloat(prefs.windowLabelWidth) : side
             let button = DockButton()
             button.isBordered = false
@@ -588,7 +592,8 @@ final class DockPanel: NSPanel {
             // apps instead and leaves everyone at full opacity. The launcher tile
             // is always live (not a running/pinned app), so it's never dimmed and
             // never gets a running box.
-            button.alphaValue = (boxed || app.isLauncher || app.isRunning) ? 1.0 : dim
+            // A folder stack is always live too (it's never "running").
+            button.alphaValue = (boxed || app.isLauncher || app.isFolder || app.isRunning) ? 1.0 : dim
             if boxed {
                 button.setRunningBox(active: app.isRunning,
                                      gap: CGFloat(prefs.boxGap),
@@ -606,8 +611,14 @@ final class DockPanel: NSPanel {
             if !perWindow, !app.isLauncher, app.windowCount > 1 {
                 button.setWindowBadge(count: app.windowCount)
             }
-            button.onActivate = { [weak self] app, forceNew in
-                if app.isLauncher { self?.onOpenLauncher?() } else { self?.onSelect?(app, forceNew) }
+            button.onActivate = { [weak self, weak button] app, forceNew in
+                if app.isLauncher {
+                    self?.onOpenLauncher?()
+                } else if let folder = app.folderURL, let button {
+                    self?.onOpenFolder?(folder, button)
+                } else {
+                    self?.onSelect?(app, forceNew)
+                }
             }
             button.onRightClick = { [weak self] in self?.showMenu(for: app, from: button) }
             button.onMiddleClick = { [weak self] in self?.handleMiddleClick(app) }
@@ -1100,6 +1111,9 @@ final class DockPanel: NSPanel {
 
     private func tooltip(for app: DockApp) -> String {
         if app.isLauncher { return "App Launcher (all applications)" }
+        if app.isFolder {
+            return app.name + (app.isPinnedEverywhere ? " (pinned everywhere)" : " (pinned)")
+        }
         // In a per-window mode each item already stands for a single window (and
         // a labeled item shows its full title below), so the "(2)" count would be
         // redundant/misleading on each copy.
@@ -1139,6 +1153,13 @@ final class DockPanel: NSPanel {
 
     private func icon(for app: DockApp) -> NSImage? {
         if app.isLauncher { return LauncherIcon.image(baseColor: Preferences.shared.launcherIconColor) }
+        // Finder's own icon for the folder (Downloads, Documents etc. get their
+        // special glyphs); a generic folder if it's gone missing.
+        if let folder = app.folderURL {
+            return FileManager.default.fileExists(atPath: folder.path)
+                ? NSWorkspace.shared.icon(forFile: folder.path)
+                : NSWorkspace.shared.icon(for: .folder)
+        }
         if let pid = app.pid, let icon = NSRunningApplication(processIdentifier: pid)?.icon {
             return icon
         }
@@ -1156,6 +1177,23 @@ final class DockPanel: NSPanel {
         // `placedOrigin` keeps a tucked-away (auto-hidden) bar off-screen, so a
         // content rebuild from the poll doesn't yank it back into view.
         setFrameOrigin(placedOrigin(forSize: frame.size, on: screen))
+    }
+
+    /// How many points, measured in from the screen edge the bar hugs, this dock
+    /// keeps clear of maximised windows — the edge gap, the bar, and a matching gap
+    /// on its inner side, so a zoomed window sits the same distance from the bar as
+    /// the bar sits from the edge. nil when it reserves nothing: hidden, removed for
+    /// a full-screen app, or auto-hiding (like the macOS Dock, an auto-hiding bar
+    /// lets windows use the whole screen).
+    var reservedInset: CGFloat? {
+        guard isVisible, !autoHideActive, !fullyHidden else { return nil }
+        return reservedThickness
+    }
+
+    /// The strip this dock would reserve when shown (ignoring auto-hide): the
+    /// value handed to Rectangle's screen-edge gap.
+    var reservedThickness: CGFloat {
+        CGFloat(Preferences.shared.edgeGap) * 2 + barThickness()
     }
 
     /// Where the panel's origin goes for a given size, per bar position.

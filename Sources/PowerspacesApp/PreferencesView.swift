@@ -188,6 +188,10 @@ struct PreferencesView: View {
         .init(name: "Dock color / tint", tab: 0, keywords: "tint colour background"),
         .init(name: "Dock outline", tab: 0, keywords: "border"),
         .init(name: "Auto-hide the dock", tab: 0, keywords: "hide reveal"),
+        .init(name: "Keep maximised windows clear of the dock", tab: 0,
+              keywords: "maximize maximise zoom tile reserve overlap behind visible frame"),
+        .init(name: "Apply dock gap to Rectangle", tab: 0,
+              keywords: "rectangle pro hookshot window manager gap screen edge"),
         .init(name: "Dock on full-screen apps", tab: 0, keywords: "fullscreen full screen hide show auto-hide"),
         .init(name: "Current-desktop indicator", tab: 0, keywords: "badge number space"),
         .init(name: "Icon size", tab: 1, keywords: "big small"),
@@ -286,8 +290,9 @@ struct PreferencesView: View {
             }
             Section {
                 enumPicker("Show dock on",
-                           help: "Put a dock on every screen, or only the screens you pick. Each "
-                               + "screen's dock is independent. It shows and acts on that screen.",
+                           help: "Separate docks: each screen's dock lists only the apps open on "
+                               + "that screen. One dock: the main screen's dock lists the apps "
+                               + "open on every screen.",
                            bind(\.dockScreensMode)) { $0.label }
                 if prefs.dockScreensMode == .selectedScreens {
                     let displays = PreferencesView.connectedDisplays()
@@ -312,9 +317,20 @@ struct PreferencesView: View {
             } header: {
                 Text("Screens")
             } footer: {
-                Text("Each screen gets its own dock showing that screen's windows, so two screens "
-                     + "behave like two desktops. Clicking a screen's dock opens windows on that "
-                     + "screen.")
+                switch prefs.dockScreensMode {
+                case .allScreens:
+                    Text("Each screen gets its own dock showing only that screen's windows, so two "
+                         + "screens behave like two desktops. Clicking a screen's dock opens windows "
+                         + "on that screen.")
+                case .mainScreen:
+                    Text("One dock on the main screen (the one with the menu bar) lists the apps "
+                         + "open on every screen. Clicking an app focuses its window on whichever "
+                         + "screen it's on; new windows open on the main screen.")
+                case .selectedScreens:
+                    Text("Only the screens you pick get a dock. Apps on a screen without a dock "
+                         + "appear in the main screen's dock (or the first dock, if the main screen "
+                         + "has none).")
+                }
             }
             Section {
                 Toggle("Tint the dock", isOn: bind(\.dockTintEnabled))
@@ -358,6 +374,18 @@ struct PreferencesView: View {
                 Toggle("Hide the dock automatically", isOn: bind(\.autoHideEnabled))
                     .help("Tuck the bar off its screen edge when the pointer is away, and "
                           + "reveal it when the pointer returns to that edge.")
+                Toggle("Keep maximised windows clear of the dock", isOn: bind(\.reserveDockSpace))
+                    .disabled(prefs.autoHideEnabled)
+                    .help("While the dock isn't auto-hiding, zoomed and tiled windows stop at "
+                          + "the dock instead of extending behind it, like the macOS Dock. "
+                          + "Needs Accessibility.")
+                Button("Apply dock gap to Rectangle / Rectangle Pro") {
+                    NotificationCenter.default.post(name: .applyRectangleGaps, object: nil)
+                }
+                .help("Sets Rectangle's hidden screen-edge gap to the space the dock takes up, "
+                      + "so its window actions stop at the dock straight away. Quits and "
+                      + "reopens Rectangle if it's running. Press again after changing the "
+                      + "dock's size, gap or position.")
                 if advanced {
                     enumPicker("Animation",
                                help: "How the bar hides and reveals: slide off the edge, fade in "

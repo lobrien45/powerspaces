@@ -95,7 +95,8 @@ public struct Launcher {
     /// a multi-display setup — see `placeNewWindowHere`.
     @discardableResult
     public func dockClick(target: AppTarget, forceNew: Bool,
-                          preferredDisplay: CGRect? = nil, dockSpace: SpaceID? = nil) throws -> LaunchOutcome {
+                          preferredDisplay: CGRect? = nil, dockSpace: SpaceID? = nil,
+                          scope: DockScope? = nil) throws -> LaunchOutcome {
         // Self-click special case
         if target.bundleID == Bundle.main.bundleIdentifier {
             return try runOnMain {
@@ -114,13 +115,29 @@ public struct Launcher {
         // opening a window there).
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let state = AppState.classify(target: target, snapshot: snapshot, frontmostPID: frontmostPID,
-                                      currentSpace: dockSpace)
+                                      currentSpace: dockSpace, scope: scope)
         Log.debug("dock-click \(target.bundleID ?? target.name ?? "?") — state \(state.label) forceNew=\(forceNew)")
-        let decision = LaunchEngine.decide(state: state, config: config, target: target, forceNew: forceNew)
-        let isFrontmost: Bool = {
+        var decision = LaunchEngine.decide(state: state, config: config, target: target, forceNew: forceNew)
+        var isFrontmost: Bool = {
             guard case let .focusWindow(_, pid) = decision else { return false }
             return frontmostPID == pid
         }()
+        // A dock covering several screens: "app is frontmost" alone isn't enough to
+        // mean "minimize". The app's focused (main) window may be on a screen this
+        // dock doesn't cover, or be a different window than the one picked. So when
+        // the app is frontmost, act on its main window if it's in this dock's scope
+        // (click → minimize it, like the macOS Dock); otherwise raise the in-scope
+        // window instead of minimizing something the user isn't looking at.
+        if let scope, isFrontmost, case let .focusWindow(_, pid) = decision, WindowAX.isTrusted {
+            let inScope = Set(snapshot.windows(of: target)
+                .filter { scope.contains($0, activeSpace: snapshot.activeSpaceID) }
+                .map(\.windowID))
+            if let main = WindowAX.mainWindowID(pid: pid), inScope.contains(main) {
+                decision = .focusWindow(windowID: main, pid: pid)
+            } else {
+                isFrontmost = false
+            }
+        }
         
         // A minimized window must always restore on click, never re-minimize.
         // Read the live AX state for the targeted window (apps like Finder stay
@@ -133,12 +150,6 @@ public struct Launcher {
             return WindowAX.isMinimized(axWindow)
         }()
         let action = LaunchEngine.dockClick(decision: decision, isFrontmost: isFrontmost, isMinimized: isMinimized)
-       
-//        var outcome: LaunchOutcome!
-        
-//        return try runOnMain {
-//            try self.perform(action, target: target, newWindowSnapshot: snapshot, preferredDisplay: preferredDisplay)
-//        }
         
         return perform(action, target: target, newWindowSnapshot: snapshot, preferredDisplay: preferredDisplay)
     }
@@ -201,12 +212,14 @@ public struct Launcher {
     /// screen's visible desktop instead of the active Space — so "Quit (this
     /// desktop)" on a dock acts on the desktop that dock is showing.
     @discardableResult
-    public func closeOnCurrentDesktop(target: AppTarget, onDisplay display: CGRect? = nil) throws -> LaunchOutcome {
+    public func closeOnCurrentDesktop(target: AppTarget, onDisplay display: CGRect? = nil,
+                                      scope: DockScope? = nil) throws -> LaunchOutcome {
         guard WindowAX.isTrusted else {
             return warned(target, "needs Accessibility (granted to the powerspaces app) to close its windows here.")
         }
         let snapshot = try provider.snapshot()
         let here = snapshot.windows(of: target).filter { window in
+            if let scope { return scope.contains(window, activeSpace: snapshot.activeSpaceID) }
             if let display { return window.isOnVisibleSpace && window.isOnDisplay(display) }
             return window.isOn(snapshot.activeSpaceID)
         }

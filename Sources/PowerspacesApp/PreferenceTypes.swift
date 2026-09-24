@@ -48,15 +48,21 @@ enum BarPosition: String, CaseIterable, Identifiable {
     var isVertical: Bool { self == .left || self == .right }
 }
 
-/// Which screens get their own powerspaces dock. `.allScreens` puts an
-/// independent dock on every display (so two screens behave like two desktops);
-/// `.selectedScreens` limits docks to the displays the user picked (by UUID).
+/// Which screens get their own powerspaces dock.
+/// - `.allScreens`: an independent dock on every display, each listing only the
+///   apps open on its own screen (two screens behave like two desktops).
+/// - `.mainScreen`: a single dock on the main (menu-bar) display that lists the
+///   apps open on *every* screen.
+/// - `.selectedScreens`: docks only on the displays the user picked (by UUID);
+///   apps on a screen without a dock appear in the main screen's dock (or the
+///   first dock, if the main screen has none).
 enum DockScreensMode: String, CaseIterable, Identifiable {
-    case allScreens, selectedScreens
+    case allScreens, mainScreen, selectedScreens
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .allScreens: return "All screens"
+        case .allScreens: return "Every screen (separate docks)"
+        case .mainScreen: return "Main screen only (one dock for all screens)"
         case .selectedScreens: return "Selected screens"
         }
     }

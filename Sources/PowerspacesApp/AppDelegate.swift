@@ -23,6 +23,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// own screen, so two screens behave like two desktops.
     private var docks: [String: DockPanel] = [:]
     private let launcherPanel = AppLauncherPanel()
+    /// The stack popover for pinned folders (one shared panel; opening another
+    /// folder's tile swaps its contents).
+    private let folderPanel = FolderStackPanel()
+    /// Trims zoomed/tiled windows so they stop at a non-auto-hiding dock.
+    private let spaceReserver = DockSpaceReserver()
     /// The optional global shortcut that opens the App Launcher from anywhere. Lazy
     /// so its fire-closure can capture `self`; applied from `applyLauncherHotkey`.
     private lazy var launcherHotkey = GlobalHotkey { [weak self] in self?.launcherPanel.toggle() }
@@ -269,6 +274,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.runLaunch(target: app.target) { try? $0.dockClick(target: app.target, forceNew: forceNew) }
         }
         applyLauncherHotkey() // register the global launcher shortcut if one is set
+        // Which strip each screen's dock reserves (nil = none): only while the
+        // feature is on and that screen's dock is showing and not auto-hiding.
+        spaceReserver.reservation = { [weak self] screen in
+            guard Preferences.shared.reserveDockSpace, let uuid = screen.displayUUID,
+                  let inset = self?.docks[uuid]?.reservedInset else { return nil }
+            let edge: ReservedArea.Edge
+            switch Preferences.shared.barPosition {
+            case .bottom: edge = .bottom
+            case .top: edge = .top
+            case .left: edge = .left
+            case .right: edge = .right
+            }
+            return (edge, inset)
+        }
+        applySpaceReservation()
         InstalledAppsStore.shared.reload() // pre-warm the app list so the launcher opens instantly
         // The strategy controller writes config.json; reload it into the live
         // launcher and refresh so the docks' submenu ticks update.
@@ -281,6 +301,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(preferencesDidChange),
             name: .preferencesDidChange, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(applyRectangleGaps),
+            name: .applyRectangleGaps, object: nil)
         // Build the docks for the displays that should have one. `refresh()` calls
         // `reconcileDocks`, which creates, configures, and shows each panel.
         refresh()
@@ -308,7 +331,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                          preferredDisplay: bounds)
                 }
                 return try? launcher.dockClick(target: app.target, forceNew: forceNew,
-                                               preferredDisplay: bounds, dockSpace: dockSpace)
+                                               preferredDisplay: bounds, dockSpace: dockSpace,
+                                               scope: self.dockScope(forDisplay: displayUUID))
             }
         }
         dock.onPinHere = { [weak self] app in
@@ -333,7 +357,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dock.onCloseThisDesktop = { [weak self] app in
             guard let self else { return }
             let bounds = self.bounds(forDisplay: displayUUID)
-            self.runLauncher { _ = try? $0.closeOnCurrentDesktop(target: app.target, onDisplay: bounds) }
+            let scope = self.dockScope(forDisplay: displayUUID)
+            self.runLauncher { _ = try? $0.closeOnCurrentDesktop(target: app.target, onDisplay: bounds,
+                                                                 scope: scope) }
         }
         dock.onCloseAllDesktops = { [weak self] app in
             self?.runLauncher { $0.quitApp(target: app.target) }
@@ -365,6 +391,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dock.onOpenLauncher = { [weak self] in
             self?.launcherPanel.toggle(on: self?.screen(forDisplay: displayUUID))
         }
+        // Pinned folder: the tile toggles its stack; "Open in Finder" (menu or
+        // middle-click) opens the folder itself in a Finder window.
+        dock.onOpenFolder = { [weak self] folder, tile in
+            self?.folderPanel.toggle(folder: folder, from: tile)
+        }
+        dock.onRevealFolder = { folder in NSWorkspace.shared.open(folder) }
         // Right-click the dock → "Open Preferences": the fallback path in when the
         // menu-bar item is set to Hidden (then there's no icon left to click).
         dock.onOpenPreferences = { [weak self] in self?.openPreferences() }
@@ -440,6 +472,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if live != .zero { return live }
         }
         return displaySpaces.first { $0.displayUUID == uuid }?.bounds
+    }
+
+    // MARK: - Dock scope (which screens a dock lists)
+
+    /// The displays whose windows the dock on `uuid` lists, own display first.
+    /// Follows `DockScope.coveredDisplayUUIDs`: with a dock on every screen each
+    /// lists only its own; with one dock (main screen only) it lists every screen.
+    private func coveredDisplays(forDockOn uuid: String) -> [DisplaySpaceInfo] {
+        let keys = DockScope.coveredDisplayUUIDs(
+            forDockOn: uuid,
+            allDisplays: displaySpaces.map(\.displayUUID),
+            docked: Set(docks.keys),
+            mainDisplay: NSScreen.mainDisplayUUID)
+        return keys.compactMap { key in displaySpaces.first { $0.displayUUID == key } }
+    }
+
+    /// The `DockScope` for the dock on `uuid`: each covered screen's live bounds
+    /// paired with its visible desktop. `ownBounds` overrides the dock's own screen
+    /// bounds (refresh passes the panel's authoritative value).
+    private func dockScope(forDisplay uuid: String, ownBounds: CGRect? = nil) -> DockScope? {
+        let covered = coveredDisplays(forDockOn: uuid)
+        guard !covered.isEmpty else { return nil }
+        let regions = covered.compactMap { info -> DockScope.Region? in
+            let isOwn = info.displayUUID == uuid
+            guard let bounds = (isOwn ? ownBounds : nil) ?? self.bounds(forDisplay: info.displayUUID),
+                  bounds != .zero else { return nil }
+            return DockScope.Region(bounds: bounds, visibleSpace: info.currentSpaceID)
+        }
+        let allBounds = NSScreen.screens.map { CGDisplayBounds($0.displayID) }.filter { $0 != .zero }
+        return DockScope(regions: regions, allDisplays: allBounds)
     }
 
     /// The `NSScreen` for this display, or nil if it isn't currently attached — used
@@ -588,7 +650,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         launcherHotkey.apply(keyCode: hotkey.keyCode, modifiers: hotkey.carbonModifiers)
     }
 
+    /// Start/stop the window-trimming watcher to match the preference, then
+    /// re-check every window (the dock may have appeared, resized, moved, or
+    /// stopped auto-hiding). Cheap and idempotent. `start()` also retries apps it
+    /// couldn't attach to earlier, e.g. before Accessibility was granted.
+    private func applySpaceReservation() {
+        if Preferences.shared.reserveDockSpace && !Preferences.shared.autoHideEnabled {
+            spaceReserver.start()
+            // After the docks have laid out for the new settings.
+            DispatchQueue.main.async { [weak self] in self?.spaceReserver.updateReservations() }
+        } else {
+            spaceReserver.stop()
+        }
+    }
+
+    /// Preferences → "Apply dock gap to Rectangle": write the live dock's reserved
+    /// strip into Rectangle / Rectangle Pro. Uses the main screen's dock (else any
+    /// dock), so it matches exactly what the window trimmer reserves.
+    @objc private func applyRectangleGaps() {
+        let prefs = Preferences.shared
+        let dock = NSScreen.mainDisplayUUID.flatMap { docks[$0] } ?? docks.values.first
+        let thickness = dock?.reservedThickness
+            ?? CGFloat(prefs.edgeGap * 2 + prefs.dockHeight)
+        RectangleSync.apply(edge: prefs.barPosition, gap: Int(thickness.rounded(.up)),
+                            mainScreenOnly: prefs.dockScreensMode == .mainScreen) { message in
+            HUD.show(message, force: true)
+        }
+    }
+
     @objc private func preferencesDidChange() {
+        applySpaceReservation()
         // Only touch the system Dock when this specific toggle flipped — every
         // preference change posts this notification, and rewriting defaults +
         // restarting the Dock on each one would be jarring.
@@ -716,6 +807,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func screensChanged() {
         pollIdleTicks = 0
         refresh()
+        // Screen geometry changed: re-trim windows against the new layout (the
+        // sweep runs async, after the docks re-place below).
+        applySpaceReservation()
         // refresh() adds/removes docks but leaves survivors where they are, and a
         // pure geometry change doesn't alter their contents (so no rebuild → no
         // reposition). Re-place every surviving dock on its (possibly moved) screen
@@ -763,6 +857,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// decide whether to back off.
     @discardableResult
     private func refresh() -> Bool {
+        // Accessibility may have been granted since launch: start trimming windows
+        // then (a cheap no-op once running, or while the feature is off).
+        if !spaceReserver.isRunning, Preferences.shared.reserveDockSpace,
+           !Preferences.shared.autoHideEnabled, AXIsProcessTrusted() {
+            applySpaceReservation()
+        }
         guard let snapshot = try? provider.snapshot() else { return false }
         // Pids that own at least one window this tick — the shared basis for both
         // window-less treatments (reaping idle instances, and the window-less dock
@@ -832,14 +932,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Hide / auto-hide / show the bar on a screen showing a full-screen app,
             // per the full-screen dock preference (a no-op while the state is unchanged).
             dock.applyFullscreenState(info.isFullscreen)
+            // Which screens this bar lists: its own, plus every other screen when
+            // it's the primary dock (see `coveredDisplays`). Each covered screen is
+            // matched on its own visible desktop, so a window minimized on another
+            // desktop of that screen still doesn't leak in.
+            let scope = dockScope(forDisplay: uuid, ownBounds: displayBounds)
+                ?? DockScope(regions: [.init(bounds: displayBounds, visibleSpace: info.currentSpaceID)],
+                             allDisplays: allDisplayBounds)
             let display = DockRefresher.displayApps(
-                onDisplay: displayBounds,
+                in: scope,
                 snapshot: displaySnapshot,
-                // This display's visible Space, so a window minimized on another
-                // desktop of the same display doesn't leak into this bar (it's
-                // off-screen-but-real, hence otherwise counted purely by geometry).
-                visibleSpace: info.currentSpaceID,
-                allDisplays: allDisplayBounds,
                 pinnedHere: spaceUUID.map { pins.spacePins(onSpace: $0) } ?? [],
                 pinnedEverywhere: pins.everywherePins(),
                 excludedHere: spaceUUID.map { pins.everywhereExceptions(onSpace: $0) } ?? [],
@@ -859,6 +961,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if marked != lastDisplayByDisplay[uuid] { anyChanged = true }
             lastDisplayByDisplay[uuid] = marked
         }
+        // A dock may have changed thickness (height/icon size/labels), edge or
+        // visibility this tick: move windows trimmed to its old line.
+        spaceReserver.updateReservations()
         return anyChanged
     }
 

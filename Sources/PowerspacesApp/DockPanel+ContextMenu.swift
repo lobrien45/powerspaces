@@ -38,6 +38,23 @@ extension DockPanel {
             popUpMenu(menu, from: button)
             return
         }
+        // A folder stack: open it, reveal it, and pin/unpin — no strategy/quit items.
+        if app.isFolder {
+            menu.addItem(item("Open in Finder", #selector(revealFolderMenu(_:)), app, symbol: "folder"))
+            menu.addItem(.separator())
+            if app.isPinnedEverywhere {
+                menu.addItem(item(app.isExcludedHere ? "Pin (this desktop)" : "Unpin (this desktop)",
+                                  #selector(toggleHereForEverywhere(_:)), app, symbol: "pin"))
+            } else {
+                menu.addItem(item(app.isPinnedHere ? "Unpin (this desktop)" : "Pin (this desktop)",
+                                  #selector(togglePinHere(_:)), app, symbol: "pin"))
+            }
+            menu.addItem(item(app.isPinnedEverywhere ? "Unpin (all desktops)" : "Pin (all desktops)",
+                              #selector(togglePinEverywhere(_:)), app, symbol: "pin.fill"))
+            addDockColorItems(to: menu)
+            popUpMenu(menu, from: button)
+            return
+        }
         menu.addItem(item("Open new window", #selector(openNewWindow(_:)), app, symbol: "macwindow.badge.plus"))
         if app.bundleID != nil {
             menu.addItem(.separator())
@@ -231,6 +248,10 @@ extension DockPanel {
         onSelect?(app, true)
     }
     @objc private func openLauncherMenu(_ s: NSMenuItem) { onOpenLauncher?() }
+    @objc private func revealFolderMenu(_ s: NSMenuItem) {
+        guard let folder = (s.representedObject as? DockApp)?.folderURL else { return }
+        onRevealFolder?(folder)
+    }
     @objc private func disableLauncherMenu(_ s: NSMenuItem) { onDisableLauncher?() }
 
     private func route(_ sender: NSMenuItem, _ handler: ((DockApp) -> Void)?) {
@@ -245,6 +266,8 @@ extension DockPanel {
     /// so middle-click does nothing on it.
     func handleMiddleClick(_ app: DockApp) {
         guard !app.isLauncher else { return }
+        // A folder stack has no windows to act on: middle-click opens it in Finder.
+        if let folder = app.folderURL { onRevealFolder?(folder); return }
         switch Preferences.shared.middleClickAction {
         case .newWindow:
             onSelect?(app, true) // force a brand-new window, like the menu's "Open new window"

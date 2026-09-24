@@ -27,6 +27,10 @@ extension Launcher {
         func tryRaise() -> Bool {
             guard let axWindow = WindowAX.axWindow(windowID: windowID, pid: pid) else { return false }
             WindowAX.unminimize(axWindow)
+            // Mark it main before the app is activated below, so activation keeps
+            // *this* window in front — it may be on a different screen from the
+            // app's previous main window (a single dock covering every display).
+            WindowAX.makeMain(axWindow)
             return AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString) == .success
         }
         var raised = tryRaise()

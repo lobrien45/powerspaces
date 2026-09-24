@@ -89,7 +89,32 @@ public enum DockRefresher {
                options: options, titleForWindow: titleForWindow)
     }
 
-    /// Shared tail of both `displayApps` overloads: expand per window (if on) and
+    /// The dock's display list for an arbitrary `scope` (one or more screens) —
+    /// same pipeline as the single-display overload. Used by the primary dock when
+    /// it also lists the other screens' apps.
+    public static func displayApps(
+        in scope: DockScope,
+        snapshot: SpaceSnapshot,
+        pinnedHere: [String],
+        pinnedEverywhere: [String],
+        excludedHere: [String] = [],
+        order: [String],
+        includeLauncher: Bool = false,
+        windowlessApps: [DockApp] = [],
+        options: DisplayOptions,
+        nameForBundleID: (String) -> String?,
+        titleForWindow: (CGWindowID, pid_t) -> String?
+    ) -> [DockApp] {
+        finish(DockModel.apps(in: scope, snapshot: snapshot,
+                              pinnedHere: pinnedHere, pinnedEverywhere: pinnedEverywhere,
+                              excludedHere: excludedHere,
+                              order: order, includeLauncher: includeLauncher,
+                              windowlessApps: windowlessApps,
+                              nameForBundleID: nameForBundleID),
+               options: options, titleForWindow: titleForWindow)
+    }
+
+    /// Shared tail of the `displayApps` overloads: expand per window (if on) and
     /// attach live window-title labels for the items `options.shouldLabel` accepts.
     private static func finish(
         _ apps: [DockApp],

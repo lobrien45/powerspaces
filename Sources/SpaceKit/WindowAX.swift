@@ -120,6 +120,18 @@ enum WindowAX {
         return CFBooleanGetValue((value as! CFBoolean))
     }
 
+    /// Make this window its app's main window. Done before activating the app so
+    /// activation brings *this* window forward — otherwise `activate()` surfaces
+    /// the app's previous main window, which may be on another screen.
+    static func makeMain(_ window: AXUIElement) {
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+    }
+
+    /// The window-server id of the app's current main window, if AX can tell.
+    static func mainWindowID(pid: pid_t) -> CGWindowID? {
+        windows(of: pid).first(where: isMain).flatMap(cgWindowID(of:))
+    }
+
     /// A window's AX role (e.g. "AXWindow", "AXSheet"), or nil when AX can't answer.
     static func role(of window: AXUIElement) -> String? {
         stringAttribute(window, kAXRoleAttribute as CFString)

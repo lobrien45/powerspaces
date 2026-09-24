@@ -82,6 +82,24 @@ public struct DockApp: Equatable, Sendable {
         DockApp(bundleID: nil, name: "Applications", pid: nil, windowCount: 0, isLauncher: true)
     }
 
+    /// Folder pins ("stacks") share the pin lists with apps: a folder is stored as
+    /// the pin key `folder:<absolute path>` wherever a bundle id would go, so
+    /// per-desktop / all-desktops pins, exceptions and the saved order all work for
+    /// folders unchanged. A folder entry carries that key as its `bundleID` (its
+    /// `orderKey` and pin identity) and is never running.
+    public static let folderPinPrefix = "folder:"
+    public static func folderPinKey(for url: URL) -> String {
+        folderPinPrefix + url.standardizedFileURL.path
+    }
+    public static func folderURL(fromPinKey key: String) -> URL? {
+        guard key.hasPrefix(folderPinPrefix) else { return nil }
+        let path = String(key.dropFirst(folderPinPrefix.count))
+        return path.isEmpty ? nil : URL(fileURLWithPath: path, isDirectory: true)
+    }
+    /// The pinned folder this entry stands for, or nil for an app / the launcher.
+    public var folderURL: URL? { bundleID.flatMap(DockApp.folderURL(fromPinKey:)) }
+    public var isFolder: Bool { folderURL != nil }
+
     /// A copy of this entry carrying a live window label (its title-bar text).
     public func withTitle(_ title: String?) -> DockApp {
         DockApp(bundleID: bundleID, name: name, pid: pid, windowCount: windowCount,
@@ -132,46 +150,16 @@ public enum DockModel {
     /// `nil` (the default, used by unit tests) for strict geometric scoping.
     public static func apps(onDisplay display: CGRect, snapshot: SpaceSnapshot,
                             visibleSpace: SpaceID? = nil, allDisplays: [CGRect]? = nil) -> [DockApp] {
-        let visible = visibleSpace.flatMap { $0 != 0 ? $0 : nil } ?? snapshot.activeSpaceID
-        return group(snapshot.windows.filter { window in
-            guard isOnVisibleDesktop(window, visibleSpace: visible) else { return false }
-            if window.isOnDisplay(display) { return true }      // center on this display
-            // Its center isn't on this display. During a native desktop-switch slide a
-            // real window's center leaves the display bounds for a beat as the desktops
-            // slide; gating purely on geometry then dropped *every* window at once, so
-            // the bar emptied and refilled (the "shrink/scale then grow"). With the
-            // full display layout known, keep it only when its center is on *no* display
-            // at all (mid-slide) — if it sits on *another* display it belongs to that
-            // display's bar. With no layout (unit tests) fall back to strict geometry.
-            guard let allDisplays else { return false }
-            return !allDisplays.contains { $0.contains(window.center) }
-        })
+        apps(in: DockScope(regions: [.init(bounds: display, visibleSpace: visibleSpace)],
+                           allDisplays: allDisplays),
+             snapshot: snapshot)
     }
 
-    /// Whether `window` is on the desktop currently visible on its display (the one
-    /// whose Space id is `visibleSpace`).
-    ///
-    /// - An **onscreen** window is, by definition, on its display's visible desktop.
-    /// - A **minimized** or **⌘-hidden** window is off-screen yet a real window that
-    ///   still belongs to a desktop — but only *its own*. It counts here only when
-    ///   its Space is `visibleSpace`; a window minimized on a different desktop of
-    ///   the same display must not leak into this one's dock.
-    /// - When the window server reports **no Space** for it (membership is only
-    ///   reliable for the active display), fall back to "yes" so a minimized window
-    ///   on a *secondary* display still shows — the geometric `isOnDisplay` test the
-    ///   caller pairs this with then scopes it to the right bar.
-    /// - Anything else off-screen (a hidden-desktop window, an off-screen
-    ///   placeholder) is not on the visible bar.
-    private static func isOnVisibleDesktop(_ window: WindowInfo, visibleSpace: SpaceID) -> Bool {
-        // Decide membership by the window's Space, which is stable across a desktop
-        // slide — not by `onscreen`, which goes false for a beat as the new desktop's
-        // windows slide in (the old `isOnVisibleSpace` guard then dropped them, so the
-        // bar emptied and refilled). A window positively on this desktop's Space is
-        // here regardless of onscreen; one on a *different* Space is not; and one the
-        // server reports no Space for falls back to onscreen/minimized/hidden.
-        if window.isOn(visibleSpace) { return true }
-        if !window.spaceIDs.isEmpty { return false }
-        return window.isOnVisibleSpace
+    /// Apps with at least one window inside `scope` — one or more screens, each on
+    /// its visible desktop (see `DockScope`). The single-display overload above is
+    /// the one-region case; the primary dock passes every screen.
+    public static func apps(in scope: DockScope, snapshot: SpaceSnapshot) -> [DockApp] {
+        group(snapshot.windows.filter { scope.contains($0, activeSpace: snapshot.activeSpaceID) })
     }
 
     /// Group a window list into one `DockApp` per app (by bundle id, else owner
@@ -244,6 +232,23 @@ public enum DockModel {
                 includeLauncher: includeLauncher, nameForBundleID: nameForBundleID)
     }
 
+    /// The multi-screen equivalent of `apps(onDisplay:pinnedHere:…)`: the dock's
+    /// running apps across every screen in `scope`, plus that desktop's pins.
+    public static func apps(in scope: DockScope,
+                            snapshot: SpaceSnapshot,
+                            pinnedHere: [String],
+                            pinnedEverywhere: [String],
+                            excludedHere: [String] = [],
+                            order: [String] = [],
+                            includeLauncher: Bool = false,
+                            windowlessApps: [DockApp] = [],
+                            nameForBundleID: (String) -> String?) -> [DockApp] {
+        arrange(running: merging(apps(in: scope, snapshot: snapshot), windowlessApps),
+                pinnedHere: pinnedHere, pinnedEverywhere: pinnedEverywhere,
+                excludedHere: excludedHere, order: order,
+                includeLauncher: includeLauncher, nameForBundleID: nameForBundleID)
+    }
+
     /// Append `windowless` running apps to the grouped `running` list, skipping any
     /// whose `orderKey` is already there (an app with a window in this scope is
     /// never window-less). Pure helper for the two `apps(…)` overloads above.
@@ -284,6 +289,15 @@ public enum DockModel {
             let here = hereSet.contains(bundleID)
             let everywhere = everywhereSet.contains(bundleID)
             let excluded = everywhere && excludedSet.contains(bundleID)
+            // A pinned folder: never running, named by its (localized) display name.
+            // Kept even if the folder has gone missing, so it can still be unpinned.
+            if let url = DockApp.folderURL(fromPinKey: bundleID) {
+                return DockApp(bundleID: bundleID,
+                               name: FileManager.default.displayName(atPath: url.path),
+                               pid: nil, windowCount: 0,
+                               isPinnedHere: here, isPinnedEverywhere: everywhere,
+                               isExcludedHere: excluded)
+            }
             if let runningApp = runningByBundle[bundleID] {
                 return DockApp(bundleID: runningApp.bundleID, name: runningApp.name, pid: runningApp.pid,
                                windowCount: runningApp.windowCount,

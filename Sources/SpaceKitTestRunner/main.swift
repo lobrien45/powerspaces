@@ -1374,6 +1374,130 @@ h.test("single display: a window on it never moves") {
     h.ok(DisplayPlacement.reposition(window: onLeft, displays: [left], active: left) == nil)
 }
 
+// MARK: - DockScope: primary dock covering several displays
+
+print("DockScope — multi-display")
+h.test("a two-region scope lists apps from both screens; a one-region scope only its own") {
+    let snap = SpaceSnapshot(activeSpaceID: 1, windows: [
+        dwin(10, 100, name: "Firefox", bundle: "org.mozilla.firefox",
+             rect: CGRect(x: 100, y: 100, width: 800, height: 600), spaces: [1]),
+        dwin(20, 200, name: "Notes", bundle: "com.apple.Notes",
+             rect: CGRect(x: 2000, y: 100, width: 800, height: 600), spaces: [1]),
+    ])
+    let both = DockScope(regions: [.init(bounds: leftDisplay, visibleSpace: 1),
+                                   .init(bounds: rightDisplay, visibleSpace: 1)],
+                         allDisplays: [leftDisplay, rightDisplay])
+    let rightOnly = DockScope(regions: [.init(bounds: rightDisplay, visibleSpace: 1)],
+                              allDisplays: [leftDisplay, rightDisplay])
+    h.eq(DockModel.apps(in: both, snapshot: snap).map(\.name), ["Firefox", "Notes"],
+         "primary dock sees both screens")
+    h.eq(DockModel.apps(in: rightOnly, snapshot: snap).map(\.name), ["Notes"],
+         "secondary dock sees only its own screen")
+}
+h.test("classify with a scope: a window on an uncovered screen is elsewhere") {
+    let snap = SpaceSnapshot(activeSpaceID: 1, windows: [
+        dwin(10, 100, name: "Firefox", bundle: "org.mozilla.firefox",
+             rect: CGRect(x: 100, y: 100, width: 800, height: 600), spaces: [1]),
+    ], runningBundleIDs: ["org.mozilla.firefox"])
+    let target = AppTarget(bundleID: "org.mozilla.firefox", name: "Firefox")
+    let rightOnly = DockScope(regions: [.init(bounds: rightDisplay, visibleSpace: 1)],
+                              allDisplays: [leftDisplay, rightDisplay])
+    let both = DockScope(regions: [.init(bounds: rightDisplay, visibleSpace: 1),
+                                   .init(bounds: leftDisplay, visibleSpace: 1)],
+                         allDisplays: [leftDisplay, rightDisplay])
+    h.eq(AppState.classify(target: target, snapshot: snap, scope: rightOnly), .windowElsewhere,
+         "right dock doesn't focus a left-screen window")
+    if case .windowHere(let id, _, _) = AppState.classify(target: target, snapshot: snap, scope: both) {
+        h.eq(id, 10, "a dock covering both screens focuses it")
+    } else { h.ok(false, "expected windowHere") }
+}
+
+h.test("coverage: separate docks each list only their own screen") {
+    let all = ["MAIN", "SIDE"]
+    let docked: Set<String> = ["MAIN", "SIDE"]
+    h.eq(DockScope.coveredDisplayUUIDs(forDockOn: "MAIN", allDisplays: all, docked: docked, mainDisplay: "MAIN"),
+         ["MAIN"], "main dock: own screen only")
+    h.eq(DockScope.coveredDisplayUUIDs(forDockOn: "SIDE", allDisplays: all, docked: docked, mainDisplay: "MAIN"),
+         ["SIDE"], "side dock: own screen only")
+}
+h.test("coverage: one dock on the main screen lists every screen") {
+    h.eq(DockScope.coveredDisplayUUIDs(forDockOn: "MAIN", allDisplays: ["MAIN", "SIDE", "THIRD"],
+                                       docked: ["MAIN"], mainDisplay: "MAIN"),
+         ["MAIN", "SIDE", "THIRD"], "all screens folded into the one dock")
+}
+h.test("coverage: undocked screens fold into the first dock when main has none") {
+    let all = ["MAIN", "A", "B"]
+    h.eq(DockScope.coveredDisplayUUIDs(forDockOn: "A", allDisplays: all, docked: ["A", "B"], mainDisplay: "MAIN"),
+         ["A", "MAIN"], "host dock picks up the undocked main screen")
+    h.eq(DockScope.coveredDisplayUUIDs(forDockOn: "B", allDisplays: all, docked: ["A", "B"], mainDisplay: "MAIN"),
+         ["B"], "other docks stay own-screen")
+}
+
+// MARK: - ReservedArea (keep maximised windows clear of the dock)
+
+print("ReservedArea")
+// A 1440×900 screen below a 25pt menu bar: visible area y 25…900 (top-left coords).
+let visibleArea = CGRect(x: 0, y: 25, width: 1440, height: 875)
+h.test("a zoomed window is trimmed to stop at a bottom dock") {
+    let zoomed = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    h.eq(ReservedArea.adjusted(window: zoomed, visible: visibleArea, edge: .bottom, inset: 80),
+         CGRect(x: 0, y: 25, width: 1440, height: 795), "bottom now at 900 − 80")
+}
+h.test("a left-half tile is trimmed too; a window dragged over the bar is left alone") {
+    let leftHalf = CGRect(x: 0, y: 25, width: 720, height: 875)
+    h.eq(ReservedArea.adjusted(window: leftHalf, visible: visibleArea, edge: .bottom, inset: 80)?.maxY,
+         820, "tile stops at the dock")
+    let dragged = CGRect(x: 200, y: 400, width: 600, height: 460) // ends at 860, not snapped
+    h.ok(ReservedArea.adjusted(window: dragged, visible: visibleArea, edge: .bottom, inset: 80) == nil,
+         "unsnapped window untouched")
+}
+h.test("side and top docks push the snapped edge inward; already-clear windows untouched") {
+    let zoomed = CGRect(x: 0, y: 25, width: 1440, height: 875)
+    h.eq(ReservedArea.adjusted(window: zoomed, visible: visibleArea, edge: .left, inset: 70),
+         CGRect(x: 70, y: 25, width: 1370, height: 875), "left dock")
+    h.eq(ReservedArea.adjusted(window: zoomed, visible: visibleArea, edge: .right, inset: 70),
+         CGRect(x: 0, y: 25, width: 1370, height: 875), "right dock")
+    h.eq(ReservedArea.adjusted(window: zoomed, visible: visibleArea, edge: .top, inset: 60),
+         CGRect(x: 0, y: 85, width: 1440, height: 815), "top dock")
+    let clear = CGRect(x: 0, y: 25, width: 1440, height: 795)
+    h.ok(ReservedArea.adjusted(window: clear, visible: visibleArea, edge: .bottom, inset: 80) == nil,
+         "no change once it fits")
+}
+
+h.test("a trimmed window follows the dock when it grows or shrinks") {
+    // Trimmed for an 80pt dock: bottom at 820. Dock grows to 100 → pushed to 800.
+    let trimmed = CGRect(x: 0, y: 25, width: 1440, height: 795)
+    h.eq(ReservedArea.adjusted(window: trimmed, visible: visibleArea, edge: .bottom,
+                               inset: 100, previousInset: 80)?.maxY, 800, "pushed in")
+    // Dock shrinks to 60 → let back out to 840.
+    h.eq(ReservedArea.adjusted(window: trimmed, visible: visibleArea, edge: .bottom,
+                               inset: 60, previousInset: 80)?.maxY, 840, "let back out")
+    // Reservation removed (inset 0) → back to the full visible height.
+    h.eq(ReservedArea.adjusted(window: trimmed, visible: visibleArea, edge: .bottom,
+                               inset: 0, previousInset: 80)?.maxY, 900, "restored")
+    // A window that wasn't on the old line is left alone.
+    let other = CGRect(x: 100, y: 100, width: 600, height: 500)
+    h.ok(ReservedArea.adjusted(window: other, visible: visibleArea, edge: .bottom,
+                               inset: 100, previousInset: 80) == nil, "unrelated window untouched")
+}
+
+// MARK: - Folder pins
+
+print("DockModel — folder pins")
+h.test("a pinned folder key round-trips and shows as a non-running folder entry") {
+    let key = DockApp.folderPinKey(for: URL(fileURLWithPath: "/Users/me/Downloads"))
+    h.eq(key, "folder:/Users/me/Downloads", "pin key format")
+    h.eq(DockApp.folderURL(fromPinKey: key)?.path, "/Users/me/Downloads", "round-trips")
+    h.ok(DockApp.folderURL(fromPinKey: "com.apple.Safari") == nil, "an app id isn't a folder")
+    let apps = DockModel.apps(onCurrentSpace: SpaceSnapshot(activeSpaceID: 1, windows: []),
+                              pinnedHere: [key], pinnedEverywhere: [],
+                              nameForBundleID: { _ in nil })
+    h.eq(apps.count, 1, "the folder shows even though nameForBundleID knows nothing")
+    h.ok(apps.first?.isFolder == true, "flagged as a folder")
+    h.ok(apps.first?.isRunning == false, "never running")
+    h.eq(apps.first?.orderKey, key, "its order key is the pin key")
+}
+
 // MARK: - Live provider smoke (skips if CGS is unavailable)
 
 print("Live provider (integration)")
